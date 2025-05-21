@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"math"
 	"math/rand"
@@ -41,20 +42,24 @@ type Message struct {
 	Filename  string
 }
 
+// Package-level variable for storage path
+var globalAbsStoragePath string
+
 // Database handler for storing message history
 type MessageStore struct {
 	db *sql.DB
 }
 
 // Initialize message store
-func NewMessageStore() (*MessageStore, error) {
+func NewMessageStore(storagePath string) (*MessageStore, error) {
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
+	if err := os.MkdirAll(storagePath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create store directory: %v", err)
 	}
 
 	// Open SQLite database for messages
-	db, err := sql.Open("sqlite3", "file:store/messages.db?_foreign_keys=on")
+	dbFilePath := filepath.Join(storagePath, "messages.db")
+	db, err := sql.Open("sqlite3", "file:"+dbFilePath+"?_foreign_keys=on")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
@@ -888,7 +893,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	var err error
 
 	// First, check if we already have this file
-	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
+	chatDir := filepath.Join(globalAbsStoragePath, strings.ReplaceAll(chatJID, ":", "_"))
 	localPath := ""
 
 	// Get media info from the database
@@ -917,7 +922,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// Generate a local path for the file
-	localPath = fmt.Sprintf("%s/%s", chatDir, filename)
+	localPath = filepath.Join(chatDir, filename)
 
 	// Get absolute path
 	absPath, err := filepath.Abs(localPath)
@@ -1257,11 +1262,27 @@ func main() {
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
 
+	// Define command-line flag for storage path
+	storagePath := flag.String("storage-path", "store", "Absolute path to the directory where attachments and database should be stored.")
+	flag.Parse()
+
+	// Normalize the storage path
+	if filepath.IsAbs(*storagePath) {
+		globalAbsStoragePath = *storagePath
+	} else {
+		cwd, err := os.Getwd()
+		if err != nil {
+			logger.Fatalf("Failed to get current working directory: %v", err)
+		}
+		globalAbsStoragePath = filepath.Join(cwd, *storagePath)
+	}
+	logger.Infof("Using storage path: %s", globalAbsStoragePath)
+
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
 	// Create directory for database if it doesn't exist
-	if err := os.MkdirAll("store", 0755); err != nil {
+	if err := os.MkdirAll(globalAbsStoragePath, 0755); err != nil {
 		logger.Errorf("Failed to create store directory: %v", err)
 		return
 	}
@@ -1269,7 +1290,8 @@ func main() {
 	// Create a context
 	ctx := context.Background()
 
-	container, err := sqlstore.New(ctx, "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	sessionDbPath := filepath.Join(globalAbsStoragePath, "whatsapp.db")
+	container, err := sqlstore.New(ctx, "sqlite3", "file:"+sessionDbPath+"?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
@@ -1296,7 +1318,7 @@ func main() {
 	}
 
 	// Initialize message store
-	messageStore, err := NewMessageStore()
+	messageStore, err := NewMessageStore(globalAbsStoragePath)
 	if err != nil {
 		logger.Errorf("Failed to initialize message store: %v", err)
 		return

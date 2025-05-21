@@ -6,9 +6,30 @@ import os.path
 import requests
 import json
 import audio
+import os # Ensure os is imported
 
-MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
+# MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
+
+_global_attachments_path = None
+
+def initialize_attachments_path(path: str) -> None:
+    global _global_attachments_path
+    if not os.path.isabs(path):
+        # Or raise an error, or try to make it absolute based on some convention
+        # For now, let's assume the input path from main.py is already absolute as per arg help text
+        print(f"Warning: Attachments path '{path}' is not absolute. This might lead to unexpected behavior.")
+    _global_attachments_path = path
+    # You could add a check here to see if the path exists or try to create it,
+    # but the Go bridge is primarily responsible for creating it.
+    # For the Python side, it's mainly for constructing the DB path.
+
+def get_messages_db_path() -> str:
+    if _global_attachments_path is None:
+        raise ValueError("Attachments path has not been initialized. Call initialize_attachments_path() first.")
+    # The messages.db is directly inside the _global_attachments_path, 
+    # consistent with how the Go bridge will now store it (e.g., /custom_path/messages.db)
+    return os.path.join(_global_attachments_path, 'messages.db')
 
 @dataclass
 class Message:
@@ -49,7 +70,7 @@ class MessageContext:
 
 def get_sender_name(sender_jid: str) -> str:
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
         
         # First try matching by exact JID
@@ -135,7 +156,7 @@ def list_messages(
 ) -> List[Message]:
     """Get messages matching the specified criteria with optional context."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
         
         # Build base query
@@ -230,7 +251,7 @@ def get_message_context(
 ) -> MessageContext:
     """Get context around a specific message."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
         
         # Get the target message first
@@ -325,7 +346,7 @@ def list_chats(
 ) -> List[Chat]:
     """Get chats matching the specified criteria."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
         
         # Build base query
@@ -393,7 +414,7 @@ def list_chats(
 def search_contacts(query: str) -> List[Contact]:
     """Search contacts by name or phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
         
         # Split query into characters to support partial matching
@@ -441,7 +462,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
         page: Page number for pagination (default 0)
     """
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -486,7 +507,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
 def get_last_interaction(jid: str) -> str:
     """Get most recent message involving the contact."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -535,7 +556,7 @@ def get_last_interaction(jid: str) -> str:
 def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]:
     """Get chat metadata by JID."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
         
         query = """
@@ -583,7 +604,7 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Chat]
 def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
     """Get chat metadata by sender phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
         
         cursor.execute("""

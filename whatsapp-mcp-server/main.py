@@ -1,5 +1,7 @@
+import argparse
 from typing import List, Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP
+import whatsapp # Added import
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -297,5 +299,17 @@ def set_group_photo(jid: str, image_path: str) -> Dict[str, Any]:
     return {"success": success, "message": message}
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="WhatsApp MCP Server")
+    parser.add_argument(
+        '--attachments-path',
+        type=str,
+        required=True,
+        help='Absolute path for storing attachments and the message database.'
+    )
+    args = parser.parse_args()
+
+    # Initialize the attachments path in the whatsapp module
+    whatsapp.initialize_attachments_path(args.attachments_path)
+
     # Initialize and run the server
     mcp.run(transport='stdio')
