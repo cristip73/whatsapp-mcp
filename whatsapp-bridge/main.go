@@ -1,12 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image"
+	"image/draw"
+	_ "image/gif" // Allow decoding GIFs
+	"image/jpeg"
+	_ "image/png" // Allow decoding PNGs
 	"math"
 	"math/rand"
 	"net/http"
@@ -20,9 +26,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
-
-	"bytes"
-
+	"github.com/nfnt/resize"
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -638,15 +642,55 @@ func setGroupPhoto(client *whatsmeow.Client, groupJID, path string) (bool, strin
 	if err != nil {
 		return false, fmt.Sprintf("invalid group JID: %v", err)
 	}
-	data, err := os.ReadFile(path)
+
+	// 1. Read Image File
+	originalData, err := os.ReadFile(path)
 	if err != nil {
-		return false, fmt.Sprintf("failed to read image: %v", err)
+		return false, fmt.Sprintf("failed to read image file %s: %v", path, err)
 	}
-	_, err = client.SetGroupPhoto(jid, data)
+
+	// 2. Decode Image
+	img, _, err := image.Decode(bytes.NewReader(originalData))
 	if err != nil {
-		return false, fmt.Sprintf("failed to set group photo: %v", err)
+		return false, fmt.Sprintf("failed to decode image %s: %v", path, err)
 	}
-	return true, "photo updated"
+
+	// 3. Center Crop Logic
+	bounds := img.Bounds()
+	origWidth := bounds.Dx()
+	origHeight := bounds.Dy()
+	var cropSize int
+	if origWidth < origHeight {
+		cropSize = origWidth
+	} else {
+		cropSize = origHeight
+	}
+	cropX := (origWidth - cropSize) / 2
+	cropY := (origHeight - cropSize) / 2
+
+	// Create a new NRGBA image for the cropped result
+	// Using draw.Draw for compatibility as discussed
+	croppedImg := image.NewNRGBA(image.Rect(0, 0, cropSize, cropSize))
+	draw.Draw(croppedImg, croppedImg.Bounds(), img, image.Pt(cropX, cropY), draw.Src)
+
+	// 4. Resize Image
+	resizedImg := resize.Resize(640, 640, croppedImg, resize.Lanczos3)
+
+	// 5. Encode to JPG
+	var buf bytes.Buffer
+	err = jpeg.Encode(&buf, resizedImg, &jpeg.Options{Quality: 85})
+	if err != nil {
+		return false, fmt.Sprintf("failed to encode processed image to JPG: %v", err)
+	}
+	processedData := buf.Bytes()
+
+	// 6. Call client.SetGroupPhoto
+	_, err = client.SetGroupPhoto(jid, processedData)
+	if err != nil {
+		return false, fmt.Sprintf("failed to set group photo using processed image: %v", err)
+	}
+
+	return true, "photo updated successfully after processing"
 }
 
 // Extract media info from a message
