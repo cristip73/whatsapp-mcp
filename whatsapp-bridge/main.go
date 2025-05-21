@@ -1272,7 +1272,8 @@ func main() {
 	} else {
 		cwd, err := os.Getwd()
 		if err != nil {
-			logger.Fatalf("Failed to get current working directory: %v", err)
+			logger.Errorf("Failed to get current working directory: %v", err)
+			return
 		}
 		globalAbsStoragePath = filepath.Join(cwd, *storagePath)
 	}
