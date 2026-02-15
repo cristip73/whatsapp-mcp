@@ -967,20 +967,25 @@ func createPoll(client *whatsmeow.Client, chatJID, question string, options []st
 			OptionName: &optName,
 		})
 	}
-	encKey := make([]byte, 32)
-	_, err = cryptoRand.Read(encKey)
+	msgSecret := make([]byte, 32)
+	_, err = cryptoRand.Read(msgSecret)
 	if err != nil {
-		return false, fmt.Sprintf("failed to generate encryption key: %v", err)
+		return false, fmt.Sprintf("failed to generate message secret: %v", err)
+	}
+	if maxSelections < 0 || maxSelections > len(options) {
+		maxSelections = 0
 	}
 	maxSel := uint32(maxSelections)
 	pollMsg := &waProto.PollCreationMessage{
 		Name:                   &question,
 		Options:                pollOptions,
 		SelectableOptionsCount: &maxSel,
-		EncKey:                 encKey,
 	}
 	msg := &waProto.Message{
 		PollCreationMessage: pollMsg,
+		MessageContextInfo: &waProto.MessageContextInfo{
+			MessageSecret: msgSecret,
+		},
 	}
 	resp, err := client.SendMessage(context.Background(), chat, msg)
 	if err != nil {
