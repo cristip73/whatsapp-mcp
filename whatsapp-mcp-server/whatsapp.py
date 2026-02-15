@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple
 import os.path
 import requests
 import json
@@ -502,6 +502,36 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
     finally:
         if 'conn' in locals():
             conn.close()
+
+
+def get_contact_groups(jid: str) -> List[Dict[str, Any]]:
+    """Get all WhatsApp groups where both you and the contact are members.
+    Uses live WhatsApp data (not just message history) so finds ALL common groups.
+
+    Args:
+        jid: The contact's JID (e.g., "40730883388@s.whatsapp.net") or phone number
+    """
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/get_contact_groups"
+        payload = {"jid": jid}
+        response = requests.post(url, json=payload)
+
+        if response.status_code == 200:
+            result = response.json()
+            if result.get("success", False):
+                return result.get("groups", [])
+            else:
+                print(f"Failed: {result.get('message', 'Unknown error')}")
+                return []
+        else:
+            print(f"Error: HTTP {response.status_code} - {response.text}")
+            return []
+    except requests.RequestException as e:
+        print(f"Request error: {str(e)}")
+        return []
+    except json.JSONDecodeError:
+        print(f"Error parsing response: {response.text}")
+        return []
 
 
 def get_last_interaction(jid: str) -> str:

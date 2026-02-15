@@ -693,6 +693,41 @@ func setGroupPhoto(client *whatsmeow.Client, groupJID, path string) (bool, strin
 	return true, "photo updated successfully after processing"
 }
 
+func getContactGroups(client *whatsmeow.Client, contactJID string) (bool, string, []GroupResult) {
+	if !client.IsConnected() {
+		return false, "Not connected to WhatsApp", nil
+	}
+
+	targetJID, err := parsePhoneOrJID(contactJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid JID: %v", err), nil
+	}
+	targetPhone := targetJID.User
+
+	groups, err := client.GetJoinedGroups(context.Background())
+	if err != nil {
+		return false, fmt.Sprintf("failed to get joined groups: %v", err), nil
+	}
+
+	var result []GroupResult
+	for _, group := range groups {
+		for _, participant := range group.Participants {
+			if participant.JID.User == targetPhone ||
+				participant.PhoneNumber.User == targetPhone ||
+				participant.LID.User == targetPhone {
+				result = append(result, GroupResult{
+					JID:              group.JID.String(),
+					Name:             group.Name,
+					ParticipantCount: len(group.Participants),
+				})
+				break
+			}
+		}
+	}
+
+	return true, fmt.Sprintf("found %d common groups", len(result)), result
+}
+
 // Extract media info from a message
 func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
@@ -857,6 +892,22 @@ type SetGroupPhotoRequest struct {
 type BasicResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+}
+
+type GetContactGroupsRequest struct {
+	JID string `json:"jid"`
+}
+
+type GroupResult struct {
+	JID              string `json:"jid"`
+	Name             string `json:"name"`
+	ParticipantCount int    `json:"participant_count"`
+}
+
+type GetContactGroupsResponse struct {
+	Success bool          `json:"success"`
+	Message string        `json:"message"`
+	Groups  []GroupResult `json:"groups,omitempty"`
 }
 
 // Store additional media info in the database
@@ -1287,6 +1338,28 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/get_contact_groups", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req GetContactGroupsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.JID == "" {
+			http.Error(w, "JID is required", http.StatusBadRequest)
+			return
+		}
+		success, msg, groups := getContactGroups(client, req.JID)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(GetContactGroupsResponse{Success: success, Message: msg, Groups: groups})
 	})
 
 	// Start the server

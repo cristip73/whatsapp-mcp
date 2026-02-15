@@ -9,6 +9,7 @@ from whatsapp import (
     get_chat as whatsapp_get_chat,
     get_direct_chat_by_contact as whatsapp_get_direct_chat_by_contact,
     get_contact_chats as whatsapp_get_contact_chats,
+    get_contact_groups as whatsapp_get_contact_groups,
     get_last_interaction as whatsapp_get_last_interaction,
     get_message_context as whatsapp_get_message_context,
     send_message as whatsapp_send_message,
@@ -137,9 +138,20 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str
     return chats
 
 @mcp.tool()
+def get_contact_groups(jid: str) -> List[Dict[str, Any]]:
+    """Get all WhatsApp groups where both you and the contact are members.
+    Uses live WhatsApp data (not just message history) so finds ALL common groups.
+
+    Args:
+        jid: The contact's JID to search for
+    """
+    groups = whatsapp_get_contact_groups(jid)
+    return groups
+
+@mcp.tool()
 def get_last_interaction(jid: str) -> str:
     """Get most recent WhatsApp message involving the contact.
-    
+
     Args:
         jid: The JID of the contact to search for
     """
