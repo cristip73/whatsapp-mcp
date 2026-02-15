@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	cryptoRand "crypto/rand"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
@@ -93,6 +94,10 @@ func NewMessageStore(storagePath string) (*MessageStore, error) {
 			PRIMARY KEY (id, chat_jid),
 			FOREIGN KEY (chat_jid) REFERENCES chats(jid)
 		);
+
+		CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp ON messages(chat_jid, timestamp);
+		CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
+		CREATE INDEX IF NOT EXISTS idx_chats_name ON chats(name);
 	`)
 	if err != nil {
 		db.Close()
@@ -728,6 +733,440 @@ func getContactGroups(client *whatsmeow.Client, contactJID string) (bool, string
 	return true, fmt.Sprintf("found %d common groups", len(result)), result
 }
 
+func getGroupInfo(client *whatsmeow.Client, groupJID string) (bool, string, *GroupInfoData) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp", nil
+	}
+	jid, err := types.ParseJID(groupJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid group JID: %v", err), nil
+	}
+	groupInfo, err := client.GetGroupInfo(context.Background(), jid)
+	if err != nil {
+		return false, fmt.Sprintf("failed to get group info: %v", err), nil
+	}
+	var participants []ParticipantInfo
+	for _, p := range groupInfo.Participants {
+		participants = append(participants, ParticipantInfo{
+			JID:     p.JID.String(),
+			Phone:   p.JID.User,
+			Name:    p.DisplayName,
+			IsAdmin: p.IsAdmin || p.IsSuperAdmin,
+		})
+	}
+	data := &GroupInfoData{
+		JID:          groupInfo.JID.String(),
+		Name:         groupInfo.Name,
+		Topic:        groupInfo.Topic,
+		Announce:     groupInfo.IsAnnounce,
+		Locked:       groupInfo.IsLocked,
+		Participants: participants,
+	}
+	return true, fmt.Sprintf("group info for %s", groupInfo.Name), data
+}
+
+func getGroupInviteLink(client *whatsmeow.Client, groupJID string, reset bool) (bool, string, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp", ""
+	}
+	jid, err := types.ParseJID(groupJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid group JID: %v", err), ""
+	}
+	link, err := client.GetGroupInviteLink(context.Background(), jid, reset)
+	if err != nil {
+		return false, fmt.Sprintf("failed to get invite link: %v", err), ""
+	}
+	return true, "invite link retrieved", link
+}
+
+func setGroupTopic(client *whatsmeow.Client, groupJID, topic string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	jid, err := types.ParseJID(groupJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid group JID: %v", err)
+	}
+	err = client.SetGroupDescription(context.Background(), jid, topic)
+	if err != nil {
+		return false, fmt.Sprintf("failed to set group topic: %v", err)
+	}
+	return true, "topic updated"
+}
+
+func setGroupAnnounce(client *whatsmeow.Client, groupJID string, announce bool) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	jid, err := types.ParseJID(groupJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid group JID: %v", err)
+	}
+	err = client.SetGroupAnnounce(context.Background(), jid, announce)
+	if err != nil {
+		return false, fmt.Sprintf("failed to set announce: %v", err)
+	}
+	return true, "announce setting updated"
+}
+
+func setGroupLocked(client *whatsmeow.Client, groupJID string, locked bool) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	jid, err := types.ParseJID(groupJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid group JID: %v", err)
+	}
+	err = client.SetGroupLocked(context.Background(), jid, locked)
+	if err != nil {
+		return false, fmt.Sprintf("failed to set locked: %v", err)
+	}
+	return true, "locked setting updated"
+}
+
+func setGroupJoinApproval(client *whatsmeow.Client, groupJID string, mode bool) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	jid, err := types.ParseJID(groupJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid group JID: %v", err)
+	}
+	err = client.SetGroupJoinApprovalMode(context.Background(), jid, mode)
+	if err != nil {
+		return false, fmt.Sprintf("failed to set join approval: %v", err)
+	}
+	return true, "join approval setting updated"
+}
+
+func isOnWhatsApp(client *whatsmeow.Client, phones []string) (bool, string, []IsOnWhatsAppResult) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp", nil
+	}
+	resp, err := client.IsOnWhatsApp(context.Background(), phones)
+	if err != nil {
+		return false, fmt.Sprintf("failed to check numbers: %v", err), nil
+	}
+	var results []IsOnWhatsAppResult
+	for _, r := range resp {
+		result := IsOnWhatsAppResult{
+			Phone:        r.Query,
+			IsOnWhatsApp: r.IsIn,
+		}
+		if r.IsIn {
+			result.JID = r.JID.String()
+		}
+		results = append(results, result)
+	}
+	return true, fmt.Sprintf("checked %d numbers", len(results)), results
+}
+
+func sendReaction(client *whatsmeow.Client, chatJID, senderJID, messageID, reaction string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid chat JID: %v", err)
+	}
+	var sender types.JID
+	if senderJID == "" || senderJID == "me" {
+		sender = *client.Store.ID
+	} else {
+		sender, err = parsePhoneOrJID(senderJID)
+		if err != nil {
+			return false, fmt.Sprintf("invalid sender JID: %v", err)
+		}
+	}
+	msg := client.BuildReaction(chat, sender, messageID, reaction)
+	_, err = client.SendMessage(context.Background(), chat, msg)
+	if err != nil {
+		return false, fmt.Sprintf("failed to send reaction: %v", err)
+	}
+	return true, "reaction sent"
+}
+
+func editMessage(client *whatsmeow.Client, chatJID, messageID, newText string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid chat JID: %v", err)
+	}
+	newContent := &waProto.Message{Conversation: proto.String(newText)}
+	msg := client.BuildEdit(chat, messageID, newContent)
+	_, err = client.SendMessage(context.Background(), chat, msg)
+	if err != nil {
+		return false, fmt.Sprintf("failed to edit message: %v", err)
+	}
+	return true, "message edited"
+}
+
+func deleteMessage(client *whatsmeow.Client, chatJID, senderJID, messageID string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid chat JID: %v", err)
+	}
+	var sender types.JID
+	if senderJID == "" || senderJID == "me" {
+		sender = *client.Store.ID
+	} else {
+		sender, err = parsePhoneOrJID(senderJID)
+		if err != nil {
+			return false, fmt.Sprintf("invalid sender JID: %v", err)
+		}
+	}
+	msg := client.BuildRevoke(chat, sender, messageID)
+	_, err = client.SendMessage(context.Background(), chat, msg)
+	if err != nil {
+		return false, fmt.Sprintf("failed to delete message: %v", err)
+	}
+	return true, "message deleted"
+}
+
+func markRead(client *whatsmeow.Client, chatJID, senderJID string, messageIDs []string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid chat JID: %v", err)
+	}
+	sender, err := parsePhoneOrJID(senderJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid sender JID: %v", err)
+	}
+	ids := make([]types.MessageID, len(messageIDs))
+	for i, id := range messageIDs {
+		ids[i] = id
+	}
+	err = client.MarkRead(context.Background(), ids, time.Now(), chat, sender)
+	if err != nil {
+		return false, fmt.Sprintf("failed to mark read: %v", err)
+	}
+	return true, fmt.Sprintf("marked %d messages as read", len(ids))
+}
+
+func createPoll(client *whatsmeow.Client, chatJID, question string, options []string, maxSelections int) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid chat JID: %v", err)
+	}
+	var pollOptions []*waProto.PollCreationMessage_Option
+	for _, opt := range options {
+		optName := opt
+		pollOptions = append(pollOptions, &waProto.PollCreationMessage_Option{
+			OptionName: &optName,
+		})
+	}
+	encKey := make([]byte, 32)
+	_, err = cryptoRand.Read(encKey)
+	if err != nil {
+		return false, fmt.Sprintf("failed to generate encryption key: %v", err)
+	}
+	maxSel := uint32(maxSelections)
+	pollMsg := &waProto.PollCreationMessage{
+		Name:                   &question,
+		Options:                pollOptions,
+		SelectableOptionsCount: &maxSel,
+		EncKey:                 encKey,
+	}
+	msg := &waProto.Message{
+		PollCreationMessage: pollMsg,
+	}
+	resp, err := client.SendMessage(context.Background(), chat, msg)
+	if err != nil {
+		return false, fmt.Sprintf("failed to create poll: %v", err)
+	}
+	return true, fmt.Sprintf("poll created (ID: %s)", resp.ID)
+}
+
+func sendReply(client *whatsmeow.Client, chatJID, quotedMessageID, quotedSenderJID, message, quotedContent string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	chat, err := types.ParseJID(chatJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid chat JID: %v", err)
+	}
+	msg := &waProto.Message{
+		ExtendedTextMessage: &waProto.ExtendedTextMessage{
+			Text: proto.String(message),
+			ContextInfo: &waProto.ContextInfo{
+				StanzaID:      proto.String(quotedMessageID),
+				Participant:   proto.String(quotedSenderJID),
+				QuotedMessage: &waProto.Message{Conversation: proto.String(quotedContent)},
+			},
+		},
+	}
+	resp, err := client.SendMessage(context.Background(), chat, msg)
+	if err != nil {
+		return false, fmt.Sprintf("failed to send reply: %v", err)
+	}
+	return true, fmt.Sprintf("reply sent (ID: %s)", resp.ID)
+}
+
+func sendPresence(client *whatsmeow.Client, presence string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	var p types.Presence
+	switch strings.ToLower(presence) {
+	case "available":
+		p = types.PresenceAvailable
+	case "unavailable":
+		p = types.PresenceUnavailable
+	default:
+		return false, fmt.Sprintf("invalid presence: %s (use 'available' or 'unavailable')", presence)
+	}
+	err := client.SendPresence(context.Background(), p)
+	if err != nil {
+		return false, fmt.Sprintf("failed to send presence: %v", err)
+	}
+	return true, fmt.Sprintf("presence set to %s", presence)
+}
+
+func setStatusMessage(client *whatsmeow.Client, message string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	err := client.SetStatusMessage(context.Background(), message)
+	if err != nil {
+		return false, fmt.Sprintf("failed to set status message: %v", err)
+	}
+	return true, "status message updated"
+}
+
+func createNewsletter(client *whatsmeow.Client, name, description string) (bool, string, string, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp", "", ""
+	}
+	params := whatsmeow.CreateNewsletterParams{
+		Name:        name,
+		Description: description,
+	}
+	meta, err := client.CreateNewsletter(context.Background(), params)
+	if err != nil {
+		return false, fmt.Sprintf("failed to create newsletter: %v", err), "", ""
+	}
+	return true, "newsletter created", meta.ID.String(), meta.ThreadMeta.Name.Text
+}
+
+func getNewsletters(client *whatsmeow.Client) (bool, string, []NewsletterInfo) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp", nil
+	}
+	newsletters, err := client.GetSubscribedNewsletters(context.Background())
+	if err != nil {
+		return false, fmt.Sprintf("failed to get newsletters: %v", err), nil
+	}
+	var result []NewsletterInfo
+	for _, n := range newsletters {
+		result = append(result, NewsletterInfo{
+			JID:         n.ID.String(),
+			Name:        n.ThreadMeta.Name.Text,
+			Description: n.ThreadMeta.Description.Text,
+		})
+	}
+	return true, fmt.Sprintf("found %d newsletters", len(result)), result
+}
+
+func newsletterSend(client *whatsmeow.Client, newsletterJID, message string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	jid, err := types.ParseJID(newsletterJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid newsletter JID: %v", err)
+	}
+	msg := &waProto.Message{Conversation: proto.String(message)}
+	_, err = client.SendMessage(context.Background(), jid, msg)
+	if err != nil {
+		return false, fmt.Sprintf("failed to send newsletter message: %v", err)
+	}
+	return true, "newsletter message sent"
+}
+
+func sendStatus(client *whatsmeow.Client, message string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	msg := &waProto.Message{Conversation: proto.String(message)}
+	_, err := client.SendMessage(context.Background(), types.StatusBroadcastJID, msg)
+	if err != nil {
+		return false, fmt.Sprintf("failed to send status: %v", err)
+	}
+	return true, "status posted"
+}
+
+func linkGroup(client *whatsmeow.Client, parentJID, childJID string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	parent, err := types.ParseJID(parentJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid parent JID: %v", err)
+	}
+	child, err := types.ParseJID(childJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid child JID: %v", err)
+	}
+	err = client.LinkGroup(context.Background(), parent, child)
+	if err != nil {
+		return false, fmt.Sprintf("failed to link group: %v", err)
+	}
+	return true, "group linked"
+}
+
+func unlinkGroup(client *whatsmeow.Client, parentJID, childJID string) (bool, string) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp"
+	}
+	parent, err := types.ParseJID(parentJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid parent JID: %v", err)
+	}
+	child, err := types.ParseJID(childJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid child JID: %v", err)
+	}
+	err = client.UnlinkGroup(context.Background(), parent, child)
+	if err != nil {
+		return false, fmt.Sprintf("failed to unlink group: %v", err)
+	}
+	return true, "group unlinked"
+}
+
+func getSubGroups(client *whatsmeow.Client, communityJID string) (bool, string, []SubGroupInfo) {
+	if !client.IsConnected() {
+		return false, "not connected to WhatsApp", nil
+	}
+	jid, err := types.ParseJID(communityJID)
+	if err != nil {
+		return false, fmt.Sprintf("invalid community JID: %v", err), nil
+	}
+	groups, err := client.GetSubGroups(context.Background(), jid)
+	if err != nil {
+		return false, fmt.Sprintf("failed to get sub groups: %v", err), nil
+	}
+	var result []SubGroupInfo
+	for _, g := range groups {
+		result = append(result, SubGroupInfo{
+			JID:  g.JID.String(),
+			Name: g.JID.String(),
+		})
+	}
+	return true, fmt.Sprintf("found %d sub groups", len(result)), result
+}
+
 // Extract media info from a message
 func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
@@ -908,6 +1347,187 @@ type GetContactGroupsResponse struct {
 	Success bool          `json:"success"`
 	Message string        `json:"message"`
 	Groups  []GroupResult `json:"groups,omitempty"`
+}
+
+// --- New request/response types for extended tools ---
+
+type GetGroupInfoRequest struct {
+	JID string `json:"jid"`
+}
+
+type ParticipantInfo struct {
+	JID        string `json:"jid"`
+	Phone      string `json:"phone"`
+	Name       string `json:"name"`
+	IsAdmin    bool   `json:"is_admin"`
+}
+
+type GroupInfoData struct {
+	JID          string            `json:"jid"`
+	Name         string            `json:"name"`
+	Topic        string            `json:"topic"`
+	Announce     bool              `json:"announce"`
+	Locked       bool              `json:"locked"`
+	Participants []ParticipantInfo `json:"participants"`
+}
+
+type GetGroupInfoResponse struct {
+	Success bool          `json:"success"`
+	Message string        `json:"message"`
+	Group   *GroupInfoData `json:"group,omitempty"`
+}
+
+type GetGroupInviteLinkRequest struct {
+	JID   string `json:"jid"`
+	Reset bool   `json:"reset"`
+}
+
+type GetGroupInviteLinkResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Link    string `json:"link,omitempty"`
+}
+
+type SetGroupTopicRequest struct {
+	JID   string `json:"jid"`
+	Topic string `json:"topic"`
+}
+
+type SetGroupAnnounceRequest struct {
+	JID      string `json:"jid"`
+	Announce bool   `json:"announce"`
+}
+
+type SetGroupLockedRequest struct {
+	JID    string `json:"jid"`
+	Locked bool   `json:"locked"`
+}
+
+type SetGroupJoinApprovalRequest struct {
+	JID  string `json:"jid"`
+	Mode bool   `json:"mode"`
+}
+
+type IsOnWhatsAppRequest struct {
+	Phones []string `json:"phones"`
+}
+
+type IsOnWhatsAppResult struct {
+	Phone        string `json:"phone"`
+	IsOnWhatsApp bool   `json:"is_on_whatsapp"`
+	JID          string `json:"jid,omitempty"`
+}
+
+type IsOnWhatsAppResponse struct {
+	Success bool                 `json:"success"`
+	Message string               `json:"message"`
+	Results []IsOnWhatsAppResult `json:"results,omitempty"`
+}
+
+type SendReactionRequest struct {
+	ChatJID   string `json:"chat_jid"`
+	SenderJID string `json:"sender_jid"`
+	MessageID string `json:"message_id"`
+	Reaction  string `json:"reaction"`
+}
+
+type EditMessageRequest struct {
+	ChatJID   string `json:"chat_jid"`
+	MessageID string `json:"message_id"`
+	NewText   string `json:"new_text"`
+}
+
+type DeleteMessageRequest struct {
+	ChatJID   string `json:"chat_jid"`
+	SenderJID string `json:"sender_jid"`
+	MessageID string `json:"message_id"`
+}
+
+type MarkReadRequest struct {
+	ChatJID    string   `json:"chat_jid"`
+	SenderJID  string   `json:"sender_jid"`
+	MessageIDs []string `json:"message_ids"`
+}
+
+type CreatePollRequest struct {
+	ChatJID       string   `json:"chat_jid"`
+	Question      string   `json:"question"`
+	Options       []string `json:"options"`
+	MaxSelections int      `json:"max_selections"`
+}
+
+type SendReplyRequest struct {
+	ChatJID         string `json:"chat_jid"`
+	QuotedMessageID string `json:"quoted_message_id"`
+	QuotedSenderJID string `json:"quoted_sender_jid"`
+	Message         string `json:"message"`
+	QuotedContent   string `json:"quoted_content"`
+}
+
+type SendPresenceRequest struct {
+	Presence string `json:"presence"`
+}
+
+type SetStatusMessageRequest struct {
+	Message string `json:"message"`
+}
+
+type CreateNewsletterRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type CreateNewsletterResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	JID     string `json:"jid,omitempty"`
+	Name    string `json:"name,omitempty"`
+}
+
+type NewsletterInfo struct {
+	JID         string `json:"jid"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type GetNewslettersResponse struct {
+	Success     bool             `json:"success"`
+	Message     string           `json:"message"`
+	Newsletters []NewsletterInfo `json:"newsletters,omitempty"`
+}
+
+type NewsletterSendRequest struct {
+	JID     string `json:"jid"`
+	Message string `json:"message"`
+}
+
+type SendStatusRequest struct {
+	Message string `json:"message"`
+}
+
+type LinkGroupRequest struct {
+	ParentJID string `json:"parent_jid"`
+	ChildJID  string `json:"child_jid"`
+}
+
+type UnlinkGroupRequest struct {
+	ParentJID string `json:"parent_jid"`
+	ChildJID  string `json:"child_jid"`
+}
+
+type GetSubGroupsRequest struct {
+	JID string `json:"jid"`
+}
+
+type SubGroupInfo struct {
+	JID  string `json:"jid"`
+	Name string `json:"name"`
+}
+
+type GetSubGroupsResponse struct {
+	Success bool           `json:"success"`
+	Message string         `json:"message"`
+	Groups  []SubGroupInfo `json:"groups,omitempty"`
 }
 
 // Store additional media info in the database
@@ -1360,6 +1980,486 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			w.WriteHeader(http.StatusInternalServerError)
 		}
 		json.NewEncoder(w).Encode(GetContactGroupsResponse{Success: success, Message: msg, Groups: groups})
+	})
+
+	// --- New handlers for extended tools ---
+
+	http.HandleFunc("/api/get_group_info", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req GetGroupInfoRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.JID == "" {
+			http.Error(w, "jid is required", http.StatusBadRequest)
+			return
+		}
+		success, msg, data := getGroupInfo(client, req.JID)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(GetGroupInfoResponse{Success: success, Message: msg, Group: data})
+	})
+
+	http.HandleFunc("/api/get_group_invite_link", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req GetGroupInviteLinkRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.JID == "" {
+			http.Error(w, "jid is required", http.StatusBadRequest)
+			return
+		}
+		success, msg, link := getGroupInviteLink(client, req.JID, req.Reset)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(GetGroupInviteLinkResponse{Success: success, Message: msg, Link: link})
+	})
+
+	http.HandleFunc("/api/set_group_topic", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req SetGroupTopicRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.JID == "" {
+			http.Error(w, "jid is required", http.StatusBadRequest)
+			return
+		}
+		success, msg := setGroupTopic(client, req.JID, req.Topic)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/set_group_announce", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req SetGroupAnnounceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.JID == "" {
+			http.Error(w, "jid is required", http.StatusBadRequest)
+			return
+		}
+		success, msg := setGroupAnnounce(client, req.JID, req.Announce)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/set_group_locked", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req SetGroupLockedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.JID == "" {
+			http.Error(w, "jid is required", http.StatusBadRequest)
+			return
+		}
+		success, msg := setGroupLocked(client, req.JID, req.Locked)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/set_group_join_approval", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req SetGroupJoinApprovalRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.JID == "" {
+			http.Error(w, "jid is required", http.StatusBadRequest)
+			return
+		}
+		success, msg := setGroupJoinApproval(client, req.JID, req.Mode)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/is_on_whatsapp", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req IsOnWhatsAppRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if len(req.Phones) == 0 {
+			http.Error(w, "phones list is required", http.StatusBadRequest)
+			return
+		}
+		success, msg, results := isOnWhatsApp(client, req.Phones)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(IsOnWhatsAppResponse{Success: success, Message: msg, Results: results})
+	})
+
+	http.HandleFunc("/api/send_reaction", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req SendReactionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.ChatJID == "" || req.MessageID == "" {
+			http.Error(w, "chat_jid and message_id are required", http.StatusBadRequest)
+			return
+		}
+		success, msg := sendReaction(client, req.ChatJID, req.SenderJID, req.MessageID, req.Reaction)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/edit_message", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req EditMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.ChatJID == "" || req.MessageID == "" || req.NewText == "" {
+			http.Error(w, "chat_jid, message_id, and new_text are required", http.StatusBadRequest)
+			return
+		}
+		success, msg := editMessage(client, req.ChatJID, req.MessageID, req.NewText)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/delete_message", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req DeleteMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.ChatJID == "" || req.MessageID == "" {
+			http.Error(w, "chat_jid and message_id are required", http.StatusBadRequest)
+			return
+		}
+		success, msg := deleteMessage(client, req.ChatJID, req.SenderJID, req.MessageID)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/mark_read", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req MarkReadRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.ChatJID == "" || len(req.MessageIDs) == 0 {
+			http.Error(w, "chat_jid and message_ids are required", http.StatusBadRequest)
+			return
+		}
+		success, msg := markRead(client, req.ChatJID, req.SenderJID, req.MessageIDs)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/create_poll", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req CreatePollRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.ChatJID == "" || req.Question == "" || len(req.Options) < 2 {
+			http.Error(w, "chat_jid, question, and at least 2 options are required", http.StatusBadRequest)
+			return
+		}
+		if req.MaxSelections <= 0 {
+			req.MaxSelections = 1
+		}
+		success, msg := createPoll(client, req.ChatJID, req.Question, req.Options, req.MaxSelections)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/send_reply", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req SendReplyRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.ChatJID == "" || req.QuotedMessageID == "" || req.Message == "" {
+			http.Error(w, "chat_jid, quoted_message_id, and message are required", http.StatusBadRequest)
+			return
+		}
+		success, msg := sendReply(client, req.ChatJID, req.QuotedMessageID, req.QuotedSenderJID, req.Message, req.QuotedContent)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/send_presence", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req SendPresenceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.Presence == "" {
+			http.Error(w, "presence is required", http.StatusBadRequest)
+			return
+		}
+		success, msg := sendPresence(client, req.Presence)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/set_status_message", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req SetStatusMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.Message == "" {
+			http.Error(w, "message is required", http.StatusBadRequest)
+			return
+		}
+		success, msg := setStatusMessage(client, req.Message)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/create_newsletter", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req CreateNewsletterRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.Name == "" {
+			http.Error(w, "name is required", http.StatusBadRequest)
+			return
+		}
+		success, msg, jid, name := createNewsletter(client, req.Name, req.Description)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(CreateNewsletterResponse{Success: success, Message: msg, JID: jid, Name: name})
+	})
+
+	http.HandleFunc("/api/get_newsletters", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		success, msg, newsletters := getNewsletters(client)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(GetNewslettersResponse{Success: success, Message: msg, Newsletters: newsletters})
+	})
+
+	http.HandleFunc("/api/newsletter_send", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req NewsletterSendRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.JID == "" || req.Message == "" {
+			http.Error(w, "jid and message are required", http.StatusBadRequest)
+			return
+		}
+		success, msg := newsletterSend(client, req.JID, req.Message)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/send_status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req SendStatusRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.Message == "" {
+			http.Error(w, "message is required", http.StatusBadRequest)
+			return
+		}
+		success, msg := sendStatus(client, req.Message)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/link_group", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req LinkGroupRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.ParentJID == "" || req.ChildJID == "" {
+			http.Error(w, "parent_jid and child_jid are required", http.StatusBadRequest)
+			return
+		}
+		success, msg := linkGroup(client, req.ParentJID, req.ChildJID)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/unlink_group", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req UnlinkGroupRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.ParentJID == "" || req.ChildJID == "" {
+			http.Error(w, "parent_jid and child_jid are required", http.StatusBadRequest)
+			return
+		}
+		success, msg := unlinkGroup(client, req.ParentJID, req.ChildJID)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(BasicResponse{Success: success, Message: msg})
+	})
+
+	http.HandleFunc("/api/get_sub_groups", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req GetSubGroupsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+		if req.JID == "" {
+			http.Error(w, "jid is required", http.StatusBadRequest)
+			return
+		}
+		success, msg, groups := getSubGroups(client, req.JID)
+		w.Header().Set("Content-Type", "application/json")
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		json.NewEncoder(w).Encode(GetSubGroupsResponse{Success: success, Message: msg, Groups: groups})
 	})
 
 	// Start the server

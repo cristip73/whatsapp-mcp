@@ -21,7 +21,35 @@ from whatsapp import (
     leave_group as whatsapp_leave_group,
     update_group_participants as whatsapp_update_group_participants,
     set_group_name as whatsapp_set_group_name,
-    set_group_photo as whatsapp_set_group_photo
+    set_group_photo as whatsapp_set_group_photo,
+    get_group_info as whatsapp_get_group_info,
+    get_group_invite_link as whatsapp_get_group_invite_link,
+    set_group_topic as whatsapp_set_group_topic,
+    set_group_announce as whatsapp_set_group_announce,
+    set_group_locked as whatsapp_set_group_locked,
+    set_group_join_approval as whatsapp_set_group_join_approval,
+    is_on_whatsapp as whatsapp_is_on_whatsapp,
+    send_reaction as whatsapp_send_reaction,
+    edit_message as whatsapp_edit_message,
+    delete_message as whatsapp_delete_message,
+    mark_read as whatsapp_mark_read,
+    create_poll as whatsapp_create_poll,
+    send_reply as whatsapp_send_reply,
+    send_presence as whatsapp_send_presence,
+    set_status_message as whatsapp_set_status_message,
+    create_newsletter as whatsapp_create_newsletter,
+    get_newsletters as whatsapp_get_newsletters,
+    newsletter_send as whatsapp_newsletter_send,
+    send_status as whatsapp_send_status,
+    link_group as whatsapp_link_group,
+    unlink_group as whatsapp_unlink_group,
+    get_sub_groups as whatsapp_get_sub_groups,
+    get_group_activity_report as whatsapp_get_group_activity_report,
+    get_member_engagement as whatsapp_get_member_engagement,
+    cross_group_search as whatsapp_cross_group_search,
+    get_participant_journey as whatsapp_get_participant_journey,
+    broadcast_to_groups as whatsapp_broadcast_to_groups,
+    get_group_overlap as whatsapp_get_group_overlap,
 )
 
 # Initialize FastMCP server
@@ -309,6 +337,342 @@ def set_group_photo(jid: str, image_path: str) -> Dict[str, Any]:
     """Update the group's photo."""
     success, message = whatsapp_set_group_photo(jid, image_path)
     return {"success": success, "message": message}
+
+
+# --- Extended Group Management Tools ---
+
+@mcp.tool()
+def get_group_info(jid: str) -> Dict[str, Any]:
+    """Get WhatsApp group metadata including participant list.
+
+    Args:
+        jid: The group JID (e.g., "120363XXX@g.us")
+    """
+    return whatsapp_get_group_info(jid)
+
+
+@mcp.tool()
+def get_group_invite_link(jid: str, reset: bool = False) -> Dict[str, Any]:
+    """Get or reset a WhatsApp group invite link.
+
+    Args:
+        jid: The group JID
+        reset: Whether to reset the invite link (default False)
+    """
+    success, message, link = whatsapp_get_group_invite_link(jid, reset)
+    return {"success": success, "message": message, "link": link}
+
+
+@mcp.tool()
+def set_group_topic(jid: str, topic: str) -> Dict[str, Any]:
+    """Set a WhatsApp group's description/topic.
+
+    Args:
+        jid: The group JID
+        topic: The new group description
+    """
+    success, message = whatsapp_set_group_topic(jid, topic)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def set_group_announce(jid: str, announce: bool) -> Dict[str, Any]:
+    """Toggle admin-only messaging for a WhatsApp group.
+
+    Args:
+        jid: The group JID
+        announce: True for admin-only messaging, False to allow all members
+    """
+    success, message = whatsapp_set_group_announce(jid, announce)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def set_group_locked(jid: str, locked: bool) -> Dict[str, Any]:
+    """Toggle admin-only group info editing.
+
+    Args:
+        jid: The group JID
+        locked: True for admin-only editing, False for all members
+    """
+    success, message = whatsapp_set_group_locked(jid, locked)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def set_group_join_approval(jid: str, mode: bool) -> Dict[str, Any]:
+    """Toggle join approval mode for a WhatsApp group.
+
+    Args:
+        jid: The group JID
+        mode: True to require admin approval for new members
+    """
+    success, message = whatsapp_set_group_join_approval(jid, mode)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def is_on_whatsapp(phones: List[str]) -> Dict[str, Any]:
+    """Check if phone numbers are registered on WhatsApp.
+
+    Args:
+        phones: List of phone numbers with country code (e.g., ["+40730883388"])
+    """
+    return whatsapp_is_on_whatsapp(phones)
+
+
+# --- Message Operation Tools ---
+
+@mcp.tool()
+def send_reaction(chat_jid: str, sender_jid: str, message_id: str, reaction: str) -> Dict[str, Any]:
+    """React to a WhatsApp message with an emoji.
+
+    Args:
+        chat_jid: The chat JID containing the message
+        sender_jid: JID of who sent the original message (use "me" for own messages)
+        message_id: The ID of the message to react to
+        reaction: The emoji reaction (empty string to remove reaction)
+    """
+    success, message = whatsapp_send_reaction(chat_jid, sender_jid, message_id, reaction)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def edit_message(chat_jid: str, message_id: str, new_text: str) -> Dict[str, Any]:
+    """Edit a previously sent WhatsApp message.
+
+    Args:
+        chat_jid: The chat JID containing the message
+        message_id: The ID of the message to edit
+        new_text: The new message text
+    """
+    success, message = whatsapp_edit_message(chat_jid, message_id, new_text)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def delete_message(chat_jid: str, sender_jid: str, message_id: str) -> Dict[str, Any]:
+    """Delete/revoke a WhatsApp message.
+
+    Args:
+        chat_jid: The chat JID containing the message
+        sender_jid: JID of who sent the message (use "me" for own messages)
+        message_id: The ID of the message to delete
+    """
+    success, message = whatsapp_delete_message(chat_jid, sender_jid, message_id)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def mark_read(chat_jid: str, sender_jid: str, message_ids: List[str]) -> Dict[str, Any]:
+    """Mark WhatsApp messages as read.
+
+    Args:
+        chat_jid: The chat JID containing the messages
+        sender_jid: JID of who sent the messages
+        message_ids: List of message IDs to mark as read
+    """
+    success, message = whatsapp_mark_read(chat_jid, sender_jid, message_ids)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def create_poll(chat_jid: str, question: str, options: List[str], max_selections: int = 1) -> Dict[str, Any]:
+    """Create a WhatsApp poll in a chat.
+
+    Args:
+        chat_jid: The chat JID to create the poll in
+        question: The poll question
+        options: List of poll options (at least 2)
+        max_selections: Maximum number of options a user can select (default 1)
+    """
+    success, message = whatsapp_create_poll(chat_jid, question, options, max_selections)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def send_reply(chat_jid: str, quoted_message_id: str, quoted_sender_jid: str, message: str, quoted_content: str = "") -> Dict[str, Any]:
+    """Reply to a specific WhatsApp message.
+
+    Args:
+        chat_jid: The chat JID
+        quoted_message_id: The ID of the message to reply to
+        quoted_sender_jid: JID of who sent the quoted message
+        message: The reply text
+        quoted_content: The original message content (for display)
+    """
+    success, msg = whatsapp_send_reply(chat_jid, quoted_message_id, quoted_sender_jid, message, quoted_content)
+    return {"success": success, "message": msg}
+
+
+# --- Presence & Status Tools ---
+
+@mcp.tool()
+def send_presence(presence: str) -> Dict[str, Any]:
+    """Set WhatsApp online/offline presence.
+
+    Args:
+        presence: Either "available" or "unavailable"
+    """
+    success, message = whatsapp_send_presence(presence)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def set_status_message(message: str) -> Dict[str, Any]:
+    """Change the WhatsApp 'About' status text.
+
+    Args:
+        message: The new status message
+    """
+    success, msg = whatsapp_set_status_message(message)
+    return {"success": success, "message": msg}
+
+
+@mcp.tool()
+def send_status(message: str) -> Dict[str, Any]:
+    """Post a text message to WhatsApp Status (stories, visible for 24h).
+
+    Args:
+        message: The status message text
+    """
+    success, msg = whatsapp_send_status(message)
+    return {"success": success, "message": msg}
+
+
+# --- Newsletter Tools ---
+
+@mcp.tool()
+def create_newsletter(name: str, description: str = "") -> Dict[str, Any]:
+    """Create a new WhatsApp Channel/Newsletter.
+
+    Args:
+        name: The channel name
+        description: Optional channel description
+    """
+    return whatsapp_create_newsletter(name, description)
+
+
+@mcp.tool()
+def get_newsletters() -> Dict[str, Any]:
+    """List all subscribed WhatsApp newsletters/channels."""
+    return whatsapp_get_newsletters()
+
+
+@mcp.tool()
+def newsletter_send(jid: str, message: str) -> Dict[str, Any]:
+    """Send a message to a WhatsApp newsletter channel.
+
+    Args:
+        jid: The newsletter JID
+        message: The message text
+    """
+    success, msg = whatsapp_newsletter_send(jid, message)
+    return {"success": success, "message": msg}
+
+
+# --- Community Tools ---
+
+@mcp.tool()
+def link_group(parent_jid: str, child_jid: str) -> Dict[str, Any]:
+    """Link a group to a WhatsApp community.
+
+    Args:
+        parent_jid: The community JID
+        child_jid: The group JID to link
+    """
+    success, message = whatsapp_link_group(parent_jid, child_jid)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def unlink_group(parent_jid: str, child_jid: str) -> Dict[str, Any]:
+    """Unlink a group from a WhatsApp community.
+
+    Args:
+        parent_jid: The community JID
+        child_jid: The group JID to unlink
+    """
+    success, message = whatsapp_unlink_group(parent_jid, child_jid)
+    return {"success": success, "message": message}
+
+
+@mcp.tool()
+def get_sub_groups(jid: str) -> Dict[str, Any]:
+    """Get all sub-groups of a WhatsApp community.
+
+    Args:
+        jid: The community JID
+    """
+    return whatsapp_get_sub_groups(jid)
+
+
+# --- Analytics Tools (SQL-based, no Go bridge needed) ---
+
+@mcp.tool()
+def get_group_activity_report(chat_jid: str, days: int = 30) -> Dict[str, Any]:
+    """Get activity report for a WhatsApp group over N days.
+
+    Args:
+        chat_jid: The group JID to analyze
+        days: Number of days to look back (default 30)
+    """
+    return whatsapp_get_group_activity_report(chat_jid, days)
+
+
+@mcp.tool()
+def get_member_engagement(chat_jid: str, days: int = 30) -> List[Dict[str, Any]]:
+    """Get per-member engagement stats for a WhatsApp group.
+
+    Args:
+        chat_jid: The group JID to analyze
+        days: Number of days to look back (default 30)
+    """
+    return whatsapp_get_member_engagement(chat_jid, days)
+
+
+@mcp.tool()
+def cross_group_search(query: str, chat_jid_pattern: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    """Search messages across all WhatsApp groups.
+
+    Args:
+        query: Search term to find in message content
+        chat_jid_pattern: Optional SQL LIKE pattern to filter groups (e.g., "%@g.us")
+        limit: Maximum results (default 50)
+    """
+    return whatsapp_cross_group_search(query, chat_jid_pattern, limit)
+
+
+@mcp.tool()
+def get_participant_journey(jid: str) -> List[Dict[str, Any]]:
+    """Get all groups and activity timeline for a WhatsApp contact.
+
+    Args:
+        jid: The contact's JID or phone number
+    """
+    return whatsapp_get_participant_journey(jid)
+
+
+@mcp.tool()
+def broadcast_to_groups(group_jids: List[str], message: str) -> List[Dict[str, Any]]:
+    """Send the same message to multiple WhatsApp groups with 3s delay.
+
+    Args:
+        group_jids: List of group JIDs to send to
+        message: The message text to broadcast
+    """
+    return whatsapp_broadcast_to_groups(group_jids, message)
+
+
+@mcp.tool()
+def get_group_overlap(group_jids: List[str]) -> Dict[str, Any]:
+    """Compare members across multiple WhatsApp groups.
+
+    Args:
+        group_jids: List of group JIDs to compare (at least 2)
+    """
+    return whatsapp_get_group_overlap(group_jids)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="WhatsApp MCP Server")

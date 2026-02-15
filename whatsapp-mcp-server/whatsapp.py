@@ -1,4 +1,5 @@
 import sqlite3
+import time
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, List, Tuple
@@ -534,6 +535,552 @@ def get_contact_groups(jid: str) -> List[Dict[str, Any]]:
         return []
 
 
+# --- Group Info & Management ---
+
+def get_group_info(jid: str) -> Dict[str, Any]:
+    """Get group metadata including participant list."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/get_group_info"
+        payload = {"jid": jid}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"success": False, "message": f"HTTP {response.status_code}: {response.text}"}
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Request error: {str(e)}"}
+
+
+def get_group_invite_link(jid: str, reset: bool = False) -> Tuple[bool, str, str]:
+    """Get or reset group invite link."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/get_group_invite_link"
+        payload = {"jid": jid, "reset": reset}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", ""), result.get("link", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}", ""
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}", ""
+
+
+def set_group_topic(jid: str, topic: str) -> Tuple[bool, str]:
+    """Set group description/topic."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/set_group_topic"
+        payload = {"jid": jid, "topic": topic}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def set_group_announce(jid: str, announce: bool) -> Tuple[bool, str]:
+    """Toggle admin-only messaging for a group."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/set_group_announce"
+        payload = {"jid": jid, "announce": announce}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def set_group_locked(jid: str, locked: bool) -> Tuple[bool, str]:
+    """Toggle admin-only info editing for a group."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/set_group_locked"
+        payload = {"jid": jid, "locked": locked}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def set_group_join_approval(jid: str, mode: bool) -> Tuple[bool, str]:
+    """Toggle join approval mode for a group."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/set_group_join_approval"
+        payload = {"jid": jid, "mode": mode}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def is_on_whatsapp(phones: List[str]) -> Dict[str, Any]:
+    """Check if phone numbers are registered on WhatsApp."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/is_on_whatsapp"
+        payload = {"phones": phones}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"success": False, "message": f"HTTP {response.status_code}: {response.text}"}
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Request error: {str(e)}"}
+
+
+# --- Message Operations ---
+
+def send_reaction(chat_jid: str, sender_jid: str, message_id: str, reaction: str) -> Tuple[bool, str]:
+    """Send a reaction to a message."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/send_reaction"
+        payload = {"chat_jid": chat_jid, "sender_jid": sender_jid, "message_id": message_id, "reaction": reaction}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def edit_message(chat_jid: str, message_id: str, new_text: str) -> Tuple[bool, str]:
+    """Edit a sent message."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/edit_message"
+        payload = {"chat_jid": chat_jid, "message_id": message_id, "new_text": new_text}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def delete_message(chat_jid: str, sender_jid: str, message_id: str) -> Tuple[bool, str]:
+    """Delete/revoke a message."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/delete_message"
+        payload = {"chat_jid": chat_jid, "sender_jid": sender_jid, "message_id": message_id}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def mark_read(chat_jid: str, sender_jid: str, message_ids: List[str]) -> Tuple[bool, str]:
+    """Mark messages as read."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/mark_read"
+        payload = {"chat_jid": chat_jid, "sender_jid": sender_jid, "message_ids": message_ids}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def create_poll(chat_jid: str, question: str, options: List[str], max_selections: int = 1) -> Tuple[bool, str]:
+    """Create a WhatsApp poll."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/create_poll"
+        payload = {"chat_jid": chat_jid, "question": question, "options": options, "max_selections": max_selections}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def send_reply(chat_jid: str, quoted_message_id: str, quoted_sender_jid: str, message: str, quoted_content: str = "") -> Tuple[bool, str]:
+    """Reply to a specific message."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/send_reply"
+        payload = {
+            "chat_jid": chat_jid,
+            "quoted_message_id": quoted_message_id,
+            "quoted_sender_jid": quoted_sender_jid,
+            "message": message,
+            "quoted_content": quoted_content,
+        }
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+# --- Advanced ---
+
+def send_presence(presence: str) -> Tuple[bool, str]:
+    """Set online/offline presence."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/send_presence"
+        payload = {"presence": presence}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def set_status_message(message: str) -> Tuple[bool, str]:
+    """Change the 'About' status text."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/set_status_message"
+        payload = {"message": message}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def create_newsletter(name: str, description: str = "") -> Dict[str, Any]:
+    """Create a WhatsApp Channel/Newsletter."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/create_newsletter"
+        payload = {"name": name, "description": description}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"success": False, "message": f"HTTP {response.status_code}: {response.text}"}
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Request error: {str(e)}"}
+
+
+def get_newsletters() -> Dict[str, Any]:
+    """List subscribed newsletters/channels."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/get_newsletters"
+        response = requests.post(url, json={})
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"success": False, "message": f"HTTP {response.status_code}: {response.text}"}
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Request error: {str(e)}"}
+
+
+def newsletter_send(jid: str, message: str) -> Tuple[bool, str]:
+    """Send a message to a newsletter channel."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/newsletter_send"
+        payload = {"jid": jid, "message": message}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def send_status(message: str) -> Tuple[bool, str]:
+    """Post to WhatsApp Status (stories, 24h)."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/send_status"
+        payload = {"message": message}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+# --- Community ---
+
+def link_group(parent_jid: str, child_jid: str) -> Tuple[bool, str]:
+    """Link a group to a community."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/link_group"
+        payload = {"parent_jid": parent_jid, "child_jid": child_jid}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def unlink_group(parent_jid: str, child_jid: str) -> Tuple[bool, str]:
+    """Unlink a group from a community."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/unlink_group"
+        payload = {"parent_jid": parent_jid, "child_jid": child_jid}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("success", False), result.get("message", "")
+        else:
+            return False, f"HTTP {response.status_code}: {response.text}"
+    except requests.RequestException as e:
+        return False, f"Request error: {str(e)}"
+
+
+def get_sub_groups(jid: str) -> Dict[str, Any]:
+    """Get community sub-groups."""
+    try:
+        url = f"{WHATSAPP_API_BASE_URL}/get_sub_groups"
+        payload = {"jid": jid}
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return {"success": False, "message": f"HTTP {response.status_code}: {response.text}"}
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Request error: {str(e)}"}
+
+
+# --- SQL Analytics (direct SQLite, no Go bridge needed) ---
+
+def get_group_activity_report(chat_jid: str, days: int = 30) -> Dict[str, Any]:
+    """Message count, unique senders, messages/day for a group over N days."""
+    try:
+        conn = sqlite3.connect(get_messages_db_path())
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total_messages,
+                COUNT(DISTINCT sender) as unique_senders,
+                MIN(timestamp) as first_message,
+                MAX(timestamp) as last_message
+            FROM messages
+            WHERE chat_jid = ? AND timestamp > datetime('now', ?)
+        """, (chat_jid, f"-{days} days"))
+        row = cursor.fetchone()
+        if not row or row[0] == 0:
+            return {"success": True, "chat_jid": chat_jid, "days": days, "total_messages": 0, "unique_senders": 0, "messages_per_day": 0.0}
+        total = row[0]
+        return {
+            "success": True,
+            "chat_jid": chat_jid,
+            "days": days,
+            "total_messages": total,
+            "unique_senders": row[1],
+            "first_message": row[2],
+            "last_message": row[3],
+            "messages_per_day": round(total / max(days, 1), 2),
+        }
+    except sqlite3.Error as e:
+        return {"success": False, "message": f"Database error: {e}"}
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def get_member_engagement(chat_jid: str, days: int = 30) -> List[Dict[str, Any]]:
+    """Per-member stats: message count, last active, classification."""
+    try:
+        conn = sqlite3.connect(get_messages_db_path())
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT
+                sender,
+                COUNT(*) as message_count,
+                MAX(timestamp) as last_active
+            FROM messages
+            WHERE chat_jid = ? AND timestamp > datetime('now', ?)
+            GROUP BY sender
+            ORDER BY message_count DESC
+        """, (chat_jid, f"-{days} days"))
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            count = row[1]
+            if count >= 50:
+                classification = "very_active"
+            elif count >= 20:
+                classification = "active"
+            elif count >= 5:
+                classification = "moderate"
+            else:
+                classification = "inactive"
+            name = get_sender_name(row[0])
+            result.append({
+                "sender": row[0],
+                "name": name,
+                "message_count": count,
+                "last_active": row[2],
+                "classification": classification,
+            })
+        return result
+    except sqlite3.Error as e:
+        return [{"error": f"Database error: {e}"}]
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def cross_group_search(query: str, chat_jid_pattern: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    """Search messages across all groups or groups matching a pattern."""
+    try:
+        conn = sqlite3.connect(get_messages_db_path())
+        cursor = conn.cursor()
+        if chat_jid_pattern:
+            cursor.execute("""
+                SELECT m.id, m.chat_jid, c.name, m.sender, m.content, m.timestamp, m.is_from_me
+                FROM messages m
+                JOIN chats c ON m.chat_jid = c.jid
+                WHERE LOWER(m.content) LIKE LOWER(?) AND m.chat_jid LIKE ?
+                ORDER BY m.timestamp DESC
+                LIMIT ?
+            """, (f"%{query}%", chat_jid_pattern, limit))
+        else:
+            cursor.execute("""
+                SELECT m.id, m.chat_jid, c.name, m.sender, m.content, m.timestamp, m.is_from_me
+                FROM messages m
+                JOIN chats c ON m.chat_jid = c.jid
+                WHERE LOWER(m.content) LIKE LOWER(?)
+                ORDER BY m.timestamp DESC
+                LIMIT ?
+            """, (f"%{query}%", limit))
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "message_id": row[0],
+                "chat_jid": row[1],
+                "chat_name": row[2],
+                "sender": row[3],
+                "content": row[4],
+                "timestamp": row[5],
+                "is_from_me": bool(row[6]),
+            })
+        return result
+    except sqlite3.Error as e:
+        return [{"error": f"Database error: {e}"}]
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def get_participant_journey(jid: str) -> List[Dict[str, Any]]:
+    """All groups + activity timeline for a contact."""
+    groups = get_contact_groups(jid)
+    result = []
+    try:
+        conn = sqlite3.connect(get_messages_db_path())
+        cursor = conn.cursor()
+        for group in groups:
+            group_jid = group.get("jid", "")
+            cursor.execute("""
+                SELECT COUNT(*), MIN(timestamp), MAX(timestamp)
+                FROM messages
+                WHERE chat_jid = ? AND sender LIKE ?
+            """, (group_jid, f"%{jid.split('@')[0] if '@' in jid else jid}%"))
+            row = cursor.fetchone()
+            result.append({
+                "group_jid": group_jid,
+                "group_name": group.get("name", ""),
+                "message_count": row[0] if row else 0,
+                "first_message": row[1] if row else None,
+                "last_message": row[2] if row else None,
+            })
+        return result
+    except sqlite3.Error as e:
+        return [{"error": f"Database error: {e}"}]
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def broadcast_to_groups(group_jids: List[str], message: str) -> List[Dict[str, Any]]:
+    """Send same message to multiple groups with 3s delay between sends."""
+    results = []
+    for jid in group_jids:
+        success, msg = send_message(jid, message)
+        results.append({"jid": jid, "success": success, "message": msg})
+        if jid != group_jids[-1]:
+            time.sleep(3)
+    return results
+
+
+def get_group_overlap(group_jids: List[str]) -> Dict[str, Any]:
+    """Compare members across 2+ groups - who's in all, who's unique."""
+    all_participants = {}
+    group_names = {}
+    for jid in group_jids:
+        info = get_group_info(jid)
+        if info.get("success") and info.get("group"):
+            group_data = info["group"]
+            group_names[jid] = group_data.get("name", jid)
+            members = set()
+            for p in group_data.get("participants", []):
+                members.add(p.get("jid", ""))
+            all_participants[jid] = members
+        else:
+            all_participants[jid] = set()
+            group_names[jid] = jid
+
+    if not all_participants:
+        return {"success": False, "message": "Could not fetch group info"}
+
+    # Find common members (in ALL groups)
+    sets = list(all_participants.values())
+    common = sets[0].copy() if sets else set()
+    for s in sets[1:]:
+        common &= s
+
+    # Find unique per group
+    unique_per_group = {}
+    for jid, members in all_participants.items():
+        others = set()
+        for other_jid, other_members in all_participants.items():
+            if other_jid != jid:
+                others |= other_members
+        unique_per_group[group_names[jid]] = list(members - others)
+
+    return {
+        "success": True,
+        "groups_analyzed": len(group_jids),
+        "common_members": list(common),
+        "common_count": len(common),
+        "unique_per_group": unique_per_group,
+    }
+
+
 def get_last_interaction(jid: str) -> str:
     """Get most recent message involving the contact."""
     try:
@@ -798,9 +1345,7 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
             result = response.json()
             if result.get("success", False):
                 path = result.get("path")
-                # Adăugăm prefixul file:// pentru afișare
-                file_url = f"file://{path}"
-                print(f"Media downloaded successfully: {file_url}")
+                print(f"Media downloaded successfully: {path}")
                 return path
             else:
                 print(f"Download failed: {result.get('message', 'Unknown error')}")
