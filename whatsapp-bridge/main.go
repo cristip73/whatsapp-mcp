@@ -543,7 +543,7 @@ func createGroup(client *whatsmeow.Client, name string, participants []string) (
 		Name:         name,
 		Participants: partJIDs,
 	}
-	groupInfo, err := client.CreateGroup(req)
+	groupInfo, err := client.CreateGroup(context.Background(), req)
 	if err != nil {
 		return false, fmt.Sprintf("failed to create group: %v", err), ""
 	}
@@ -555,7 +555,7 @@ func joinGroupWithLink(client *whatsmeow.Client, link string) (bool, string, str
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp", ""
 	}
-	jid, err := client.JoinGroupWithLink(link)
+	jid, err := client.JoinGroupWithLink(context.Background(), link)
 	if err != nil {
 		return false, fmt.Sprintf("failed to join group: %v", err), ""
 	}
@@ -571,7 +571,7 @@ func leaveGroup(client *whatsmeow.Client, groupJID string) (bool, string) {
 	if err != nil {
 		return false, fmt.Sprintf("invalid group JID: %v", err)
 	}
-	err = client.LeaveGroup(jid)
+	err = client.LeaveGroup(context.Background(), jid)
 	if err != nil {
 		return false, fmt.Sprintf("failed to leave group: %v", err)
 	}
@@ -610,7 +610,7 @@ func updateGroupParticipants(client *whatsmeow.Client, groupJID, action string, 
 		return false, "invalid action"
 	}
 
-	_, err = client.UpdateGroupParticipants(jid, partJIDs, change)
+	_, err = client.UpdateGroupParticipants(context.Background(), jid, partJIDs, change)
 	if err != nil {
 		return false, fmt.Sprintf("failed to update participants: %v", err)
 	}
@@ -626,7 +626,7 @@ func setGroupName(client *whatsmeow.Client, groupJID, name string) (bool, string
 	if err != nil {
 		return false, fmt.Sprintf("invalid group JID: %v", err)
 	}
-	err = client.SetGroupName(jid, name)
+	err = client.SetGroupName(context.Background(), jid, name)
 	if err != nil {
 		return false, fmt.Sprintf("failed to set group name: %v", err)
 	}
@@ -685,7 +685,7 @@ func setGroupPhoto(client *whatsmeow.Client, groupJID, path string) (bool, strin
 	processedData := buf.Bytes()
 
 	// 6. Call client.SetGroupPhoto
-	_, err = client.SetGroupPhoto(jid, processedData)
+	_, err = client.SetGroupPhoto(context.Background(), jid, processedData)
 	if err != nil {
 		return false, fmt.Sprintf("failed to set group photo using processed image: %v", err)
 	}
@@ -1509,7 +1509,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 		// If we didn't get a name, try group info
 		if name == "" {
-			groupInfo, err := client.GetGroupInfo(jid)
+			groupInfo, err := client.GetGroupInfo(context.Background(), jid)
 			if err == nil && groupInfo.Name != "" {
 				name = groupInfo.Name
 			} else {
