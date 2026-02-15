@@ -118,14 +118,14 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
     output = ""
     
     if show_chat_info and message.chat_name:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] Chat: {message.chat_name} "
+        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] [ID: {message.id}] Chat: {message.chat_name} "
     else:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
-        
+        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] [ID: {message.id}] "
+
     content_prefix = ""
     if hasattr(message, 'media_type') and message.media_type:
-        content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
-    
+        content_prefix = f"[{message.media_type} - Chat JID: {message.chat_jid}] "
+
     try:
         sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
         output += f"From: {sender_name}: {content_prefix}{message.content}\n"
@@ -537,14 +537,23 @@ def get_contact_groups(jid: str) -> List[Dict[str, Any]]:
 
 # --- Group Info & Management ---
 
-def get_group_info(jid: str) -> Dict[str, Any]:
-    """Get group metadata including participant list."""
+def get_group_info(jid: str, include_participants: bool = False, participant_limit: int = 50, participant_offset: int = 0) -> Dict[str, Any]:
+    """Get group metadata with optional participant list."""
     try:
         url = f"{WHATSAPP_API_BASE_URL}/get_group_info"
         payload = {"jid": jid}
         response = requests.post(url, json=payload)
         if response.status_code == 200:
-            return response.json()
+            result = response.json()
+            if result.get("success") and "group" in result:
+                group = result["group"]
+                participants = group.get("participants", [])
+                group["participant_count"] = len(participants)
+                if not include_participants:
+                    del group["participants"]
+                else:
+                    group["participants"] = participants[participant_offset:participant_offset + participant_limit]
+            return result
         else:
             return {"success": False, "message": f"HTTP {response.status_code}: {response.text}"}
     except requests.RequestException as e:
@@ -910,8 +919,11 @@ def get_group_activity_report(chat_jid: str, days: int = 30) -> Dict[str, Any]:
             conn.close()
 
 
-def get_member_engagement(chat_jid: str, days: int = 30) -> List[Dict[str, Any]]:
-    """Per-member stats: message count, last active, classification."""
+def get_member_engagement(chat_jid: str, days: int = 30) -> Dict[str, Any]:
+    """Per-member stats: message count, last active, classification.
+
+    Classification criteria: very_active (50+ msgs), active (20+), moderate (5+), inactive (<5).
+    """
     try:
         conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
@@ -926,9 +938,11 @@ def get_member_engagement(chat_jid: str, days: int = 30) -> List[Dict[str, Any]]
             ORDER BY message_count DESC
         """, (chat_jid, f"-{days} days"))
         rows = cursor.fetchall()
-        result = []
+        members = []
+        total_messages = 0
         for row in rows:
             count = row[1]
+            total_messages += count
             if count >= 50:
                 classification = "very_active"
             elif count >= 20:
@@ -938,14 +952,14 @@ def get_member_engagement(chat_jid: str, days: int = 30) -> List[Dict[str, Any]]
             else:
                 classification = "inactive"
             name = get_sender_name(row[0])
-            result.append({
+            members.append({
                 "sender": row[0],
                 "name": name,
                 "message_count": count,
                 "last_active": row[2],
                 "classification": classification,
             })
-        return result
+        return {"total_messages": total_messages, "unique_senders": len(members), "members": members}
     except sqlite3.Error as e:
         return [{"error": f"Database error: {e}"}]
     finally:
@@ -953,7 +967,7 @@ def get_member_engagement(chat_jid: str, days: int = 30) -> List[Dict[str, Any]]
             conn.close()
 
 
-def cross_group_search(query: str, chat_jid_pattern: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+def cross_group_search(query: str, chat_jid_pattern: Optional[str] = None, limit: int = 50, max_content_length: int = 200) -> List[Dict[str, Any]]:
     """Search messages across all groups or groups matching a pattern."""
     try:
         conn = sqlite3.connect(get_messages_db_path())
@@ -979,12 +993,15 @@ def cross_group_search(query: str, chat_jid_pattern: Optional[str] = None, limit
         rows = cursor.fetchall()
         result = []
         for row in rows:
+            content = row[4] or ""
+            if max_content_length and len(content) > max_content_length:
+                content = content[:max_content_length] + "..."
             result.append({
                 "message_id": row[0],
                 "chat_jid": row[1],
                 "chat_name": row[2],
                 "sender": row[3],
-                "content": row[4],
+                "content": content,
                 "timestamp": row[5],
                 "is_from_me": bool(row[6]),
             })
@@ -996,7 +1013,7 @@ def cross_group_search(query: str, chat_jid_pattern: Optional[str] = None, limit
             conn.close()
 
 
-def get_participant_journey(jid: str) -> List[Dict[str, Any]]:
+def get_participant_journey(jid: str, include_empty: bool = False) -> List[Dict[str, Any]]:
     """All groups + activity timeline for a contact."""
     groups = get_contact_groups(jid)
     result = []
@@ -1011,10 +1028,13 @@ def get_participant_journey(jid: str) -> List[Dict[str, Any]]:
                 WHERE chat_jid = ? AND sender LIKE ?
             """, (group_jid, f"%{jid.split('@')[0] if '@' in jid else jid}%"))
             row = cursor.fetchone()
+            msg_count = row[0] if row else 0
+            if not include_empty and msg_count == 0:
+                continue
             result.append({
                 "group_jid": group_jid,
                 "group_name": group.get("name", ""),
-                "message_count": row[0] if row else 0,
+                "message_count": msg_count,
                 "first_message": row[1] if row else None,
                 "last_message": row[2] if row else None,
             })
@@ -1026,23 +1046,23 @@ def get_participant_journey(jid: str) -> List[Dict[str, Any]]:
             conn.close()
 
 
-def broadcast_to_groups(group_jids: List[str], message: str) -> List[Dict[str, Any]]:
-    """Send same message to multiple groups with 3s delay between sends."""
+def broadcast_to_groups(group_jids: List[str], message: str, delay_seconds: int = 3) -> List[Dict[str, Any]]:
+    """Send same message to multiple groups with delay between sends."""
     results = []
     for jid in group_jids:
         success, msg = send_message(jid, message)
         results.append({"jid": jid, "success": success, "message": msg})
         if jid != group_jids[-1]:
-            time.sleep(3)
+            time.sleep(delay_seconds)
     return results
 
 
-def get_group_overlap(group_jids: List[str]) -> Dict[str, Any]:
-    """Compare members across 2+ groups - who's in all, who's unique."""
+def get_group_overlap(group_jids: List[str], include_members: bool = False) -> Dict[str, Any]:
+    """Compare members across 2+ groups. Returns counts by default."""
     all_participants = {}
     group_names = {}
     for jid in group_jids:
-        info = get_group_info(jid)
+        info = get_group_info(jid, include_participants=True, participant_limit=10000)
         if info.get("success") and info.get("group"):
             group_data = info["group"]
             group_names[jid] = group_data.get("name", jid)
@@ -1070,15 +1090,17 @@ def get_group_overlap(group_jids: List[str]) -> Dict[str, Any]:
         for other_jid, other_members in all_participants.items():
             if other_jid != jid:
                 others |= other_members
-        unique_per_group[group_names[jid]] = list(members - others)
+        unique_per_group[group_names[jid]] = list(members - others) if include_members else len(members - others)
 
-    return {
+    result = {
         "success": True,
         "groups_analyzed": len(group_jids),
-        "common_members": list(common),
         "common_count": len(common),
         "unique_per_group": unique_per_group,
     }
+    if include_members:
+        result["common_members"] = list(common)
+    return result
 
 
 def get_last_interaction(jid: str) -> str:

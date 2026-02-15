@@ -1159,9 +1159,14 @@ func getSubGroups(client *whatsmeow.Client, communityJID string) (bool, string, 
 	}
 	var result []SubGroupInfo
 	for _, g := range groups {
+		name := g.JID.String()
+		groupInfo, err := client.GetGroupInfo(context.Background(), g.JID)
+		if err == nil && groupInfo.Name != "" {
+			name = groupInfo.Name
+		}
 		result = append(result, SubGroupInfo{
 			JID:  g.JID.String(),
-			Name: g.JID.String(),
+			Name: name,
 		})
 	}
 	return true, fmt.Sprintf("found %d sub groups", len(result)), result

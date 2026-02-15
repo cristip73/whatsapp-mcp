@@ -342,13 +342,16 @@ def set_group_photo(jid: str, image_path: str) -> Dict[str, Any]:
 # --- Extended Group Management Tools ---
 
 @mcp.tool()
-def get_group_info(jid: str) -> Dict[str, Any]:
+def get_group_info(jid: str, include_participants: bool = False, participant_limit: int = 50, participant_offset: int = 0) -> Dict[str, Any]:
     """Get WhatsApp group metadata including participant list.
 
     Args:
         jid: The group JID (e.g., "120363XXX@g.us")
+        include_participants: Whether to include the participant list (default False). Metadata (name, topic, settings, participant_count) is always returned.
+        participant_limit: Max participants to return when include_participants=True (default 50)
+        participant_offset: Offset for participant pagination (default 0)
     """
-    return whatsapp_get_group_info(jid)
+    return whatsapp_get_group_info(jid, include_participants, participant_limit, participant_offset)
 
 
 @mcp.tool()
@@ -357,7 +360,7 @@ def get_group_invite_link(jid: str, reset: bool = False) -> Dict[str, Any]:
 
     Args:
         jid: The group JID
-        reset: Whether to reset the invite link (default False)
+        reset: Whether to reset the invite link (default False). WARNING: reset=true invalidates the previous invite link permanently.
     """
     success, message, link = whatsapp_get_group_invite_link(jid, reset)
     return {"success": success, "message": message, "link": link}
@@ -372,7 +375,7 @@ def set_group_topic(jid: str, topic: str) -> Dict[str, Any]:
         topic: The new group description
     """
     success, message = whatsapp_set_group_topic(jid, topic)
-    return {"success": success, "message": message}
+    return {"success": success, "message": message, "topic": topic}
 
 
 @mcp.tool()
@@ -384,7 +387,7 @@ def set_group_announce(jid: str, announce: bool) -> Dict[str, Any]:
         announce: True for admin-only messaging, False to allow all members
     """
     success, message = whatsapp_set_group_announce(jid, announce)
-    return {"success": success, "message": message}
+    return {"success": success, "message": message, "announce": announce}
 
 
 @mcp.tool()
@@ -396,7 +399,7 @@ def set_group_locked(jid: str, locked: bool) -> Dict[str, Any]:
         locked: True for admin-only editing, False for all members
     """
     success, message = whatsapp_set_group_locked(jid, locked)
-    return {"success": success, "message": message}
+    return {"success": success, "message": message, "locked": locked}
 
 
 @mcp.tool()
@@ -408,7 +411,7 @@ def set_group_join_approval(jid: str, mode: bool) -> Dict[str, Any]:
         mode: True to require admin approval for new members
     """
     success, message = whatsapp_set_group_join_approval(jid, mode)
-    return {"success": success, "message": message}
+    return {"success": success, "message": message, "mode": mode}
 
 
 @mcp.tool()
@@ -514,6 +517,8 @@ def send_presence(presence: str) -> Dict[str, Any]:
     Args:
         presence: Either "available" or "unavailable"
     """
+    if presence not in ("available", "unavailable"):
+        return {"success": False, "message": f"Invalid presence '{presence}'. Must be 'available' or 'unavailable'."}
     success, message = whatsapp_send_presence(presence)
     return {"success": success, "message": message}
 
@@ -523,7 +528,7 @@ def set_status_message(message: str) -> Dict[str, Any]:
     """Change the WhatsApp 'About' status text.
 
     Args:
-        message: The new status message
+        message: The new status message (max 139 characters per WhatsApp limit)
     """
     success, msg = whatsapp_set_status_message(message)
     return {"success": success, "message": msg}
@@ -575,7 +580,7 @@ def newsletter_send(jid: str, message: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def link_group(parent_jid: str, child_jid: str) -> Dict[str, Any]:
-    """Link a group to a WhatsApp community.
+    """Link a group to a WhatsApp community. WARNING: This modifies community structure.
 
     Args:
         parent_jid: The community JID
@@ -587,7 +592,7 @@ def link_group(parent_jid: str, child_jid: str) -> Dict[str, Any]:
 
 @mcp.tool()
 def unlink_group(parent_jid: str, child_jid: str) -> Dict[str, Any]:
-    """Unlink a group from a WhatsApp community.
+    """Unlink a group from a WhatsApp community. WARNING: This modifies community structure.
 
     Args:
         parent_jid: The community JID
@@ -621,57 +626,65 @@ def get_group_activity_report(chat_jid: str, days: int = 30) -> Dict[str, Any]:
 
 
 @mcp.tool()
-def get_member_engagement(chat_jid: str, days: int = 30) -> List[Dict[str, Any]]:
+def get_member_engagement(chat_jid: str, days: int = 30) -> Dict[str, Any]:
     """Get per-member engagement stats for a WhatsApp group.
 
     Args:
         chat_jid: The group JID to analyze
         days: Number of days to look back (default 30)
+
+    Classification: very_active (50+ msgs), active (20+), moderate (5+), inactive (<5).
+    Returns total_messages, unique_senders, and per-member breakdown.
     """
     return whatsapp_get_member_engagement(chat_jid, days)
 
 
 @mcp.tool()
-def cross_group_search(query: str, chat_jid_pattern: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+def cross_group_search(query: str, chat_jid_pattern: Optional[str] = None, limit: int = 50, max_content_length: int = 200) -> List[Dict[str, Any]]:
     """Search messages across all WhatsApp groups.
 
     Args:
         query: Search term to find in message content
         chat_jid_pattern: Optional SQL LIKE pattern to filter groups (e.g., "%@g.us")
         limit: Maximum results (default 50)
+        max_content_length: Truncate message content to this length (default 200). Set to 0 for full content.
     """
-    return whatsapp_cross_group_search(query, chat_jid_pattern, limit)
+    return whatsapp_cross_group_search(query, chat_jid_pattern, limit, max_content_length)
 
 
 @mcp.tool()
-def get_participant_journey(jid: str) -> List[Dict[str, Any]]:
+def get_participant_journey(jid: str, include_empty: bool = False) -> List[Dict[str, Any]]:
     """Get all groups and activity timeline for a WhatsApp contact.
 
     Args:
         jid: The contact's JID or phone number
+        include_empty: Include groups where contact has 0 messages (default False)
     """
-    return whatsapp_get_participant_journey(jid)
+    return whatsapp_get_participant_journey(jid, include_empty)
 
 
 @mcp.tool()
-def broadcast_to_groups(group_jids: List[str], message: str) -> List[Dict[str, Any]]:
-    """Send the same message to multiple WhatsApp groups with 3s delay.
+def broadcast_to_groups(group_jids: List[str], message: str, delay_seconds: int = 3) -> List[Dict[str, Any]]:
+    """Send the same message to multiple WhatsApp groups with delay between sends.
+    WARNING: This sends real messages to all specified groups. Use with caution.
 
     Args:
         group_jids: List of group JIDs to send to
         message: The message text to broadcast
+        delay_seconds: Seconds to wait between sends (default 3)
     """
-    return whatsapp_broadcast_to_groups(group_jids, message)
+    return whatsapp_broadcast_to_groups(group_jids, message, delay_seconds)
 
 
 @mcp.tool()
-def get_group_overlap(group_jids: List[str]) -> Dict[str, Any]:
+def get_group_overlap(group_jids: List[str], include_members: bool = False) -> Dict[str, Any]:
     """Compare members across multiple WhatsApp groups.
 
     Args:
         group_jids: List of group JIDs to compare (at least 2)
+        include_members: Whether to include full member lists (default False). When False, returns only counts.
     """
-    return whatsapp_get_group_overlap(group_jids)
+    return whatsapp_get_group_overlap(group_jids, include_members)
 
 
 if __name__ == "__main__":
