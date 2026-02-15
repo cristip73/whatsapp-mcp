@@ -1,0 +1,7 @@
+{
+  "enabledPlugins": {},
+  "plansDirectory": "./_PLAN",
+  "env": {
+    "ENABLE_TOOL_SEARCH": "auto:5"
+  }
+}
