@@ -421,7 +421,7 @@ def search_messages(
 ) -> Any:
     """Search or get context around WhatsApp messages. Pick ONE action:
 
-    - "context": Get messages around a specific message. Requires: message_id (optional: before, after)
+    - "context": Get N messages around a specific message. Requires: message_id (optional: before=5, after=5 — number of surrounding messages to return)
     - "cross_group": Search messages across all groups. Requires: query (optional: chat_jid_pattern, limit, max_content_length)
     """
     if action == "context":
