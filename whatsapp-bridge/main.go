@@ -1178,26 +1178,35 @@ func getSubGroups(client *whatsmeow.Client, communityJID string) (bool, string, 
 }
 
 // Extract media info from a message
-func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+func extractMediaInfo(msg *waProto.Message, messageID string) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
 	if msg == nil {
 		return "", "", "", nil, nil, nil, 0
 	}
 
+	ts := time.Now().Format("20060102_150405")
+	// Use messageID for unique filenames; fallback to nanoseconds if empty
+	suffix := ts
+	if messageID != "" {
+		suffix = ts + "_" + messageID
+	} else {
+		suffix = ts + "_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+
 	// Check for image message
 	if img := msg.GetImageMessage(); img != nil {
-		return "image", "image_" + time.Now().Format("20060102_150405") + ".jpg",
+		return "image", "image_" + suffix + ".jpg",
 			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
 	}
 
 	// Check for video message
 	if vid := msg.GetVideoMessage(); vid != nil {
-		return "video", "video_" + time.Now().Format("20060102_150405") + ".mp4",
+		return "video", "video_" + suffix + ".mp4",
 			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
 	}
 
 	// Check for audio message
 	if aud := msg.GetAudioMessage(); aud != nil {
-		return "audio", "audio_" + time.Now().Format("20060102_150405") + ".ogg",
+		return "audio", "audio_" + suffix + ".ogg",
 			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
 	}
 
@@ -1205,7 +1214,7 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 	if doc := msg.GetDocumentMessage(); doc != nil {
 		filename := doc.GetFileName()
 		if filename == "" {
-			filename = "document_" + time.Now().Format("20060102_150405")
+			filename = "document_" + suffix
 		}
 		return "document", filename,
 			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
@@ -1213,7 +1222,7 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 
 	// Check for sticker message
 	if sticker := msg.GetStickerMessage(); sticker != nil {
-		return "sticker", "sticker_" + time.Now().Format("20060102_150405") + ".webp",
+		return "sticker", "sticker_" + suffix + ".webp",
 			sticker.GetURL(), sticker.GetMediaKey(), sticker.GetFileSHA256(), sticker.GetFileEncSHA256(), sticker.GetFileLength()
 	}
 
@@ -1239,7 +1248,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	content := extractTextContent(msg.Message)
 
 	// Extract media info
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
+	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message, msg.Info.ID)
 
 	// Skip if there's no content and no media
 	if content == "" && mediaType == "" {
@@ -1644,6 +1653,13 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	// Create directory for the chat if it doesn't exist
 	if err := os.MkdirAll(chatDir, 0755); err != nil {
 		return false, "", "", "", fmt.Errorf("failed to create chat directory: %v", err)
+	}
+
+	// Ensure filename includes messageID for uniqueness (fix for old DB entries)
+	if messageID != "" && !strings.Contains(filename, messageID) {
+		ext := filepath.Ext(filename)
+		base := strings.TrimSuffix(filename, ext)
+		filename = base + "_" + messageID + ext
 	}
 
 	// Generate a local path for the file
@@ -2787,8 +2803,14 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				var mediaKey, fileSHA256, fileEncSHA256 []byte
 				var fileLength uint64
 
+				// Extract message ID early for unique filename generation
+				msgID := ""
+				if msg.Message.Key != nil && msg.Message.Key.ID != nil {
+					msgID = *msg.Message.Key.ID
+				}
+
 				if msg.Message.Message != nil {
-					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message)
+					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message, msgID)
 				}
 
 				// Log the message content for debugging
@@ -2817,11 +2839,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					sender = jid.User
 				}
 
-				// Store message
-				msgID := ""
-				if msg.Message.Key != nil && msg.Message.Key.ID != nil {
-					msgID = *msg.Message.Key.ID
-				}
+				// Store message (msgID already extracted above)
 
 				// Get message timestamp
 				timestamp := time.Time{}
