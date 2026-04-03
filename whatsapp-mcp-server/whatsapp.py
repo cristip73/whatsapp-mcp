@@ -12,6 +12,13 @@ import os # Ensure os is imported
 # MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
 
+# WhatsApp Desktop native database (macOS) — fallback for recent messages
+CHATSTORAGE_DB_PATH = os.path.expanduser(
+    "~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite"
+)
+# Apple epoch offset: Core Data NSDate uses 2001-01-01 as epoch
+APPLE_EPOCH_OFFSET = 978307200
+
 _global_attachments_path = None
 
 def initialize_attachments_path(path: str) -> None:
@@ -143,6 +150,220 @@ def format_messages_list(messages: List[Message], show_chat_info: bool = True) -
         output += format_message(message, show_chat_info)
     return output
 
+def _chatstorage_available() -> bool:
+    """Check if WhatsApp Desktop ChatStorage.sqlite exists and is readable."""
+    return os.path.isfile(CHATSTORAGE_DB_PATH)
+
+
+def _query_chatstorage_messages(
+    after: Optional[datetime] = None,
+    before: Optional[datetime] = None,
+    chat_jid: Optional[str] = None,
+    query_text: Optional[str] = None,
+    limit: int = 20,
+    page: int = 0,
+) -> List[Message]:
+    """Query WhatsApp Desktop ChatStorage.sqlite for messages. Returns Message objects."""
+    if not _chatstorage_available():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{CHATSTORAGE_DB_PATH}?mode=ro", uri=True)
+        cursor = conn.cursor()
+
+        sql_parts = ["""
+            SELECT
+                ZMESSAGEDATE,
+                ZISFROMME,
+                ZFROMJID,
+                ZTEXT,
+                cs.ZCONTACTJID,
+                cs.ZPARTNERNAME,
+                m.ZSTANZAID,
+                m.ZMESSAGETYPE
+            FROM ZWAMESSAGE m
+            JOIN ZWACHATSESSION cs ON m.ZCHATSESSION = cs.Z_PK
+        """]
+        where = []
+        params = []
+
+        if chat_jid:
+            where.append("cs.ZCONTACTJID = ?")
+            params.append(chat_jid)
+        if after:
+            apple_ts = after.timestamp() - APPLE_EPOCH_OFFSET
+            where.append("m.ZMESSAGEDATE > ?")
+            params.append(apple_ts)
+        if before:
+            apple_ts = before.timestamp() - APPLE_EPOCH_OFFSET
+            where.append("m.ZMESSAGEDATE < ?")
+            params.append(apple_ts)
+        if query_text:
+            where.append("LOWER(m.ZTEXT) LIKE LOWER(?)")
+            params.append(f"%{query_text}%")
+
+        # Exclude system messages (type 6 = group events, etc.)
+        where.append("m.ZTEXT IS NOT NULL")
+        where.append("m.ZMESSAGETYPE IN (0, 1, 2, 3, 5)")  # text, image, video, audio, document
+
+        if where:
+            sql_parts.append("WHERE " + " AND ".join(where))
+
+        offset = page * limit
+        sql_parts.append("ORDER BY m.ZMESSAGEDATE DESC")
+        sql_parts.append("LIMIT ? OFFSET ?")
+        params.extend([limit, offset])
+
+        cursor.execute(" ".join(sql_parts), tuple(params))
+        rows = cursor.fetchall()
+
+        result = []
+        for row in rows:
+            msg_date_apple, is_from_me, from_jid, text, contact_jid, partner_name, stanza_id, msg_type = row
+            unix_ts = msg_date_apple + APPLE_EPOCH_OFFSET if msg_date_apple else 0
+            ts = datetime.fromtimestamp(unix_ts)
+
+            media_map = {0: None, 1: "image", 2: "video", 3: "audio", 5: "document"}
+            media = media_map.get(msg_type)
+
+            result.append(Message(
+                timestamp=ts,
+                sender=from_jid if from_jid and not is_from_me else (contact_jid or ""),
+                content=text or (f"[{media}]" if media else ""),
+                is_from_me=bool(is_from_me),
+                chat_jid=contact_jid or "",
+                id=stanza_id or f"cs_{int(unix_ts)}",
+                chat_name=partner_name,
+                media_type=media,
+            ))
+        return result
+    except sqlite3.Error as e:
+        print(f"ChatStorage fallback error: {e}")
+        return []
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def _query_chatstorage_chats(
+    query_text: Optional[str] = None,
+    limit: int = 20,
+    page: int = 0,
+) -> List[Chat]:
+    """Query WhatsApp Desktop ChatStorage.sqlite for chats."""
+    if not _chatstorage_available():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{CHATSTORAGE_DB_PATH}?mode=ro", uri=True)
+        cursor = conn.cursor()
+
+        sql_parts = ["""
+            SELECT
+                ZCONTACTJID,
+                ZPARTNERNAME,
+                ZLASTMESSAGEDATE,
+                ZLASTMESSAGETEXT
+            FROM ZWACHATSESSION
+        """]
+        where = []
+        params = []
+
+        if query_text:
+            where.append("(LOWER(ZPARTNERNAME) LIKE LOWER(?) OR ZCONTACTJID LIKE ?)")
+            params.extend([f"%{query_text}%", f"%{query_text}%"])
+
+        where.append("ZCONTACTJID IS NOT NULL")
+
+        if where:
+            sql_parts.append("WHERE " + " AND ".join(where))
+
+        sql_parts.append("ORDER BY ZLASTMESSAGEDATE DESC")
+        offset = page * limit
+        sql_parts.append("LIMIT ? OFFSET ?")
+        params.extend([limit, offset])
+
+        cursor.execute(" ".join(sql_parts), tuple(params))
+        rows = cursor.fetchall()
+
+        result = []
+        for row in rows:
+            jid, name, last_date_apple, last_text = row
+            last_time = None
+            if last_date_apple:
+                unix_ts = last_date_apple + APPLE_EPOCH_OFFSET
+                last_time = datetime.fromtimestamp(unix_ts)
+            result.append(Chat(
+                jid=jid or "",
+                name=name,
+                last_message_time=last_time,
+                last_message=last_text,
+            ))
+        return result
+    except sqlite3.Error as e:
+        print(f"ChatStorage chats fallback error: {e}")
+        return []
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def _query_chatstorage_contacts(query_text: str) -> List[Contact]:
+    """Search contacts in WhatsApp Desktop ChatStorage.sqlite."""
+    if not _chatstorage_available():
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{CHATSTORAGE_DB_PATH}?mode=ro", uri=True)
+        cursor = conn.cursor()
+
+        pattern = f"%{query_text}%"
+        cursor.execute("""
+            SELECT ZCONTACTJID, ZPARTNERNAME
+            FROM ZWACHATSESSION
+            WHERE (LOWER(ZPARTNERNAME) LIKE LOWER(?) OR LOWER(ZCONTACTJID) LIKE LOWER(?))
+              AND ZCONTACTJID NOT LIKE '%@g.us'
+              AND ZCONTACTJID IS NOT NULL
+            ORDER BY ZPARTNERNAME
+            LIMIT 50
+        """, (pattern, pattern))
+
+        result = []
+        for jid, name in cursor.fetchall():
+            result.append(Contact(
+                phone_number=jid.split('@')[0] if jid else "",
+                name=name,
+                jid=jid or "",
+            ))
+        return result
+    except sqlite3.Error as e:
+        print(f"ChatStorage contacts fallback error: {e}")
+        return []
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def _normalize_timestamp(ts: datetime) -> datetime:
+    """Strip timezone info for consistent comparison."""
+    if ts.tzinfo is not None:
+        return ts.replace(tzinfo=None)
+    return ts
+
+
+def _merge_messages(primary: List[Message], fallback: List[Message]) -> List[Message]:
+    """Merge two message lists, dedup by id, sort by timestamp DESC."""
+    seen_ids = set()
+    merged = []
+    for msg in primary:
+        if msg.id not in seen_ids:
+            seen_ids.add(msg.id)
+            merged.append(msg)
+    for msg in fallback:
+        if msg.id not in seen_ids:
+            seen_ids.add(msg.id)
+            merged.append(msg)
+    merged.sort(key=lambda m: _normalize_timestamp(m.timestamp), reverse=True)
+    return merged
+
+
 def list_messages(
     after: Optional[str] = None,
     before: Optional[str] = None,
@@ -222,27 +443,53 @@ def list_messages(
                 media_type=msg[7]
             )
             result.append(message)
-            
-        if include_context and result:
-            # Add context for each message
-            messages_with_context = []
-            for msg in result:
+
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        result = []
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+    # ChatStorage.sqlite fallback: augment with WhatsApp Desktop native DB
+    # Triggers when: no results, or newest message is older than 24h
+    needs_fallback = not result
+    if result and not needs_fallback:
+        newest = max(_normalize_timestamp(msg.timestamp) for msg in result)
+        age = datetime.now() - newest
+        needs_fallback = age.total_seconds() > 86400  # 24 hours
+
+    if needs_fallback and _chatstorage_available():
+        parsed_after = datetime.fromisoformat(after) if isinstance(after, str) else after
+        parsed_before = datetime.fromisoformat(before) if isinstance(before, str) else before
+        cs_messages = _query_chatstorage_messages(
+            after=parsed_after,
+            before=parsed_before,
+            chat_jid=chat_jid,
+            query_text=query,
+            limit=limit,
+            page=page,
+        )
+        if cs_messages:
+            result = _merge_messages(result, cs_messages)[:limit]
+
+    if include_context and result:
+        # Add context for each message
+        messages_with_context = []
+        for msg in result:
+            try:
                 context = get_message_context(msg.id, context_before, context_after)
                 messages_with_context.extend(context.before)
                 messages_with_context.append(context.message)
                 messages_with_context.extend(context.after)
-            
-            return format_messages_list(messages_with_context, show_chat_info=True)
-            
-        # Format and display messages without context
-        return format_messages_list(result, show_chat_info=True)    
-        
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
-        return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
+            except (ValueError, sqlite3.Error):
+                # Message from ChatStorage won't have context in messages.db
+                messages_with_context.append(msg)
+
+        return format_messages_list(messages_with_context, show_chat_info=True)
+
+    # Format and display messages without context
+    return format_messages_list(result, show_chat_info=True)
 
 
 def get_message_context(
@@ -401,15 +648,19 @@ def list_chats(
                 last_is_from_me=chat_data[5]
             )
             result.append(chat)
-            
-        return result
-        
+
     except sqlite3.Error as e:
         print(f"Database error: {e}")
-        return []
+        result = []
     finally:
         if 'conn' in locals():
             conn.close()
+
+    # ChatStorage fallback for chats
+    if not result and _chatstorage_available():
+        result = _query_chatstorage_chats(query_text=query, limit=limit, page=page)
+
+    return result
 
 
 def search_contacts(query: str) -> List[Contact]:
@@ -443,15 +694,19 @@ def search_contacts(query: str) -> List[Contact]:
                 jid=contact_data[0]
             )
             result.append(contact)
-            
-        return result
-        
+
     except sqlite3.Error as e:
         print(f"Database error: {e}")
-        return []
+        result = []
     finally:
         if 'conn' in locals():
             conn.close()
+
+    # ChatStorage fallback for contacts
+    if not result and _chatstorage_available():
+        result = _query_chatstorage_contacts(query)
+
+    return result
 
 
 def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:

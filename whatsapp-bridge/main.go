@@ -2640,6 +2640,9 @@ func main() {
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
+	// Request history sync to populate messages.db with recent messages
+	requestHistorySync(client)
+
 	// Start REST API server
 	startRESTServer(client, messageStore, 8080)
 
