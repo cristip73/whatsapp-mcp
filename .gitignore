@@ -3,7 +3,9 @@ claude_desktop_config.json
 whatsapp.log
 whatsapp-bridge/store/
 whatsapp-bridge/whatsapp-bridge
+whatsapp-bridge/whatsapp-client
 
 .DS_Store
 _PLAN/
 _implemented/
+_REPORTS/
