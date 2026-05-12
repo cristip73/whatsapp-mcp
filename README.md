@@ -22,7 +22,7 @@ Here's an example of what you can do when it's connected to Claude.
 - **Python** 3.10+
 - **UV** (Python package manager): `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - **An MCP client**: Claude Code, Claude Desktop, or Cursor
-- **FFmpeg** (_optional_) — only needed if you want to send audio files as playable WhatsApp voice messages. Without it, audio files are sent as regular file attachments.
+- **FFmpeg** (_optional_) - only needed if you want to send audio files as playable WhatsApp voice messages. Without it, audio files are sent as regular file attachments.
 
 ### Step 1: Clone and build
 
@@ -39,19 +39,19 @@ cd ..
 ### Step 2: Create a data folder
 
 The bridge and MCP server share a **data folder** where everything is stored:
-- `messages.db` — your WhatsApp message history (SQLite database)
-- `whatsapp.db` — your WhatsApp session/authentication data
+- `messages.db` - your WhatsApp message history (SQLite database)
+- `whatsapp.db` - your WhatsApp session/authentication data
 - Downloaded media files (photos, videos, documents), organized by chat
 
 Both the Go bridge (`-storage-path`) and the Python MCP server (`--attachments-path`) must point to **the same folder**.
 
-Create it somewhere persistent, for example in your Documents folder:
+Create it somewhere persistent:
 
 ```bash
-mkdir -p ~/Documents/WhatsApp-MCP-Data
+mkdir -p ~/CLAUDE/whatsapp-media
 ```
 
-You'll use this path in the next steps. In the examples below, we use `~/Documents/WhatsApp-MCP-Data` — replace it with your chosen path.
+You'll use this path in the next steps. In the examples below, we use `~/CLAUDE/whatsapp-media` -- replace it with your chosen path.
 
 ### Step 3: Authenticate with WhatsApp
 
@@ -59,7 +59,7 @@ Run the bridge **manually in a terminal** so you can see the QR code:
 
 ```bash
 cd whatsapp-bridge
-./whatsapp-bridge -storage-path="$HOME/Documents/WhatsApp-MCP-Data"
+./whatsapp-bridge -storage-path="$HOME/CLAUDE/whatsapp-media"
 ```
 
 1. A QR code appears in the terminal
@@ -81,7 +81,7 @@ The bridge needs to be running whenever you want to use WhatsApp through your MC
 Simple, but the bridge stops when you close the terminal:
 
 ```bash
-./whatsapp-bridge -storage-path="$HOME/Documents/WhatsApp-MCP-Data"
+./whatsapp-bridge -storage-path="$HOME/CLAUDE/whatsapp-media"
 ```
 
 #### Option B: macOS background service (recommended)
@@ -103,7 +103,7 @@ Set up `launchd` so the bridge starts on login, restarts on crash, and runs inde
     <array>
         <string>/Users/YOUR_USERNAME/path/to/whatsapp-mcp/whatsapp-bridge/whatsapp-bridge</string>
         <string>-storage-path</string>
-        <string>/Users/YOUR_USERNAME/Documents/WhatsApp-MCP-Data</string>
+        <string>/Users/YOUR_USERNAME/CLAUDE/whatsapp-media</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -154,9 +154,9 @@ tail -f ~/Library/Logs/whatsapp-bridge.log
 
 ### Step 5: Configure the MCP server
 
-The MCP server is what connects your AI client (Claude, Cursor) to the bridge. It runs automatically when your client starts — you just need to tell the client where to find it.
+The MCP server is what connects your AI client (Claude, Cursor) to the bridge. It runs automatically when your client starts - you just need to tell the client where to find it.
 
-Create a `.mcp.json` configuration file. Here's a **complete example** — you need to replace 3 paths:
+Create a `.mcp.json` configuration file. Here's a **complete example** - you need to replace 3 paths:
 
 ```json
 {
@@ -169,7 +169,7 @@ Create a `.mcp.json` configuration file. Here's a **complete example** — you n
         "/Users/YOUR_USERNAME/path/to/whatsapp-mcp/whatsapp-mcp-server",
         "main.py",
         "--attachments-path",
-        "/Users/YOUR_USERNAME/Documents/WhatsApp-MCP-Data"
+        "/Users/YOUR_USERNAME/CLAUDE/whatsapp-media"
       ]
     }
   }
@@ -182,7 +182,7 @@ Create a `.mcp.json` configuration file. Here's a **complete example** — you n
 |---|---|---|
 | `command` (path to `uv`) | Run `which uv` in terminal | `/opt/homebrew/bin/uv` |
 | `--directory` (path to MCP server) | From the repo root, it's the `whatsapp-mcp-server` subfolder | `/Users/jane/Code/whatsapp-mcp/whatsapp-mcp-server` |
-| `--attachments-path` (data folder) | The same folder from step 2 | `/Users/jane/Documents/WhatsApp-MCP-Data` |
+| `--attachments-path` (data folder) | The same folder from step 2 | `/Users/jane/CLAUDE/whatsapp-media` |
 
 > **Important**: The `--attachments-path` must be the same folder as the bridge's `-storage-path`. This is how the MCP server finds the message database and downloaded media.
 
@@ -229,7 +229,7 @@ The system has two components that share a data folder:
                                               │                         │
                                               ▼                         ▼
                                      ┌──────────────────────────────────────┐
-                                     │  ~/Documents/WhatsApp-MCP-Data/     │
+                                     │  ~/CLAUDE/whatsapp-media/            │
                                      │  ├── messages.db  (message history) │
                                      │  ├── whatsapp.db  (session data)   │
                                      │  └── media files  (by chat JID)    │
@@ -300,6 +300,7 @@ By default, only media metadata is stored in the local database. The message wil
 - **WhatsApp Already Logged In**: If your session is already active, the Go bridge will automatically reconnect without showing a QR code.
 - **Device Limit Reached**: WhatsApp limits the number of linked devices. If you reach this limit, you'll need to remove an existing device from WhatsApp on your phone (Settings > Linked Devices).
 - **No Messages Loading**: After initial authentication, it can take several minutes for your message history to load, especially if you have many chats.
-- **WhatsApp Out of Sync**: If your WhatsApp messages get out of sync with the bridge, delete both database files (`messages.db` and `whatsapp.db`) from your storage directory (default: `whatsapp-bridge/store/`) and restart the bridge to re-authenticate.
+- **WhatsApp Out of Sync**: If your WhatsApp messages get out of sync with the bridge, delete both database files (`messages.db` and `whatsapp.db`) from your data folder and restart the bridge to re-authenticate.
+- **Bridge Shows QR Code Unexpectedly**: If the bridge asks for QR scan even though you authenticated recently, check that the `-storage-path` flag points to the folder containing your `whatsapp.db` session file. A common cause is authenticating manually with one path but running the launchd service with a different path. Run `sqlite3 <path>/whatsapp.db "SELECT jid FROM whatsmeow_device;"` to verify which DB has your session.
 
 For additional Claude Desktop integration troubleshooting, see the [MCP documentation](https://modelcontextprotocol.io/quickstart/server#claude-for-desktop-integration-issues). The documentation includes helpful tips for checking logs and resolving common issues.
