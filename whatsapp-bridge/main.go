@@ -2488,6 +2488,60 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		json.NewEncoder(w).Encode(GetSubGroupsResponse{Success: success, Message: msg, Groups: groups})
 	})
 
+	// Handler for connection status
+	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		isConnected := client.IsConnected()
+		isLoggedIn := client.Store.ID != nil
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"connected": isConnected,
+			"logged_in": isLoggedIn,
+		})
+	})
+
+	// Handler for reconnecting
+	http.HandleFunc("/api/reconnect", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if client.IsConnected() {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"message": "already connected",
+			})
+			return
+		}
+		if client.Store.ID == nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "not logged in - restart bridge and scan QR code",
+			})
+			return
+		}
+		client.Disconnect()
+		err := client.Connect()
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("reconnect failed: %v", err),
+			})
+			return
+		}
+		time.Sleep(2 * time.Second)
+		if !client.IsConnected() {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "reconnect attempted but still not connected",
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "reconnected successfully",
+		})
+	})
+
 	// Start the server
 	serverAddr := fmt.Sprintf(":%d", port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)

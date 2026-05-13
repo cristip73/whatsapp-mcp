@@ -1497,6 +1497,24 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
         if 'conn' in locals():
             conn.close()
 
+def connection_status() -> Dict[str, Any]:
+    try:
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/status", timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return {"connected": False, "logged_in": False, "error": f"HTTP {response.status_code}"}
+    except requests.RequestException as e:
+        return {"connected": False, "logged_in": False, "error": f"Bridge unreachable: {e}"}
+
+
+def reconnect() -> Dict[str, Any]:
+    try:
+        response = requests.post(f"{WHATSAPP_API_BASE_URL}/reconnect", timeout=15)
+        return response.json()
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Bridge unreachable: {e}"}
+
+
 def send_message(recipient: str, message: str) -> Tuple[bool, str]:
     try:
         # Validate input

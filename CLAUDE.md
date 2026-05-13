@@ -72,7 +72,8 @@ To use this MCP server in a project, create a `.mcp.json` file in the project ro
 
 The server uses **hybrid progressive disclosure**: 6 tools exposed directly, 8 hidden tool groups discoverable via meta-tools.
 
-**4 direct tools** (always visible to the LLM):
+**5 direct tools** (always visible to the LLM):
+- `connection` - check status or reconnect dropped session (actions: status, reconnect)
 - `search_contacts` - search by name or phone
 - `list_messages` - query messages with filters, pagination, context
 - `list_chats` - list chats sorted by activity or name
@@ -95,6 +96,8 @@ The server uses **hybrid progressive disclosure**: 6 tools exposed directly, 8 h
 ### Go HTTP API (`whatsapp-bridge/main.go`)
 
 Single file. All endpoints under `/api/` prefix on port 8080. Key routes:
+- `/api/status` - GET connection status (connected, logged_in)
+- `/api/reconnect` - POST reconnect dropped session without restart
 - `/api/send` - send text/media messages
 - `/api/download` - download media from messages
 - `/api/create_group`, `/api/join_group`, `/api/leave_group` - group lifecycle
@@ -125,8 +128,9 @@ Single file. All endpoints under `/api/` prefix on port 8080. Key routes:
 ## Important Notes
 
 - Go bridge must be running before using MCP server
-- First run requires QR code scan (WhatsApp → Linked Devices → Link a Device)
+- First run requires QR code scan (WhatsApp -> Linked Devices -> Link a Device)
 - Sessions expire ~20 days - re-scan QR code when that happens
+- Dropped connections can be recovered via `connection(action="reconnect")` or `curl -X POST localhost:8080/api/reconnect` - no bridge restart needed
 - `--attachments-path` (Python) and `-storage-path` (Go) must point to the **same folder**
 - Media stored as metadata only; use `download_media` tool to fetch actual files
 - Audio voice messages require `.ogg` Opus format; FFmpeg auto-converts other formats

@@ -3,6 +3,8 @@ from typing import List, Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP
 import whatsapp
 from whatsapp import (
+    connection_status as whatsapp_connection_status,
+    reconnect as whatsapp_reconnect,
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
     list_chats as whatsapp_list_chats,
@@ -478,6 +480,18 @@ def _search_registry(query: str, limit: int = 5) -> List[Dict[str, Any]]:
 
 
 # ── 4 direct tools (always in LLM context) ──────────────────────────────────
+
+
+@mcp.tool()
+def connection(action: str = "status") -> Dict[str, Any]:
+    """Check WhatsApp connection status or reconnect.
+
+    Args:
+        action: "status" (default) to check, or "reconnect" to reconnect a dropped session
+    """
+    if action == "reconnect":
+        return whatsapp_reconnect()
+    return whatsapp_connection_status()
 
 
 @mcp.tool()
