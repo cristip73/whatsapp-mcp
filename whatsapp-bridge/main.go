@@ -16,6 +16,7 @@ import (
 	_ "image/png" // Allow decoding PNGs
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -2544,11 +2545,26 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 	// Start the server
 	serverAddr := fmt.Sprintf(":%d", port)
+
+	// Check if another instance is already running on this port
+	checkConn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", port), time.Second)
+	if err == nil {
+		checkConn.Close()
+		fmt.Printf("ERROR: Another whatsapp-bridge instance is already running on port %d.\n", port)
+		fmt.Println("Stop the existing instance first, or use a different port.")
+		os.Exit(1)
+	}
+
+	listener, err := net.Listen("tcp", serverAddr)
+	if err != nil {
+		fmt.Printf("REST API server error: %v\n", err)
+		os.Exit(1)
+	}
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	// Run server in a goroutine so it doesn't block
 	go func() {
-		if err := http.ListenAndServe(serverAddr, nil); err != nil {
+		if err := http.Serve(listener, nil); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
