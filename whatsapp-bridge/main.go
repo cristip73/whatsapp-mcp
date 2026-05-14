@@ -16,6 +16,7 @@ import (
 	_ "image/png" // Allow decoding PNGs
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -2542,13 +2543,16 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
-	// Start the server
 	serverAddr := fmt.Sprintf(":%d", port)
+	listener, err := net.Listen("tcp", serverAddr)
+	if err != nil {
+		fmt.Printf("ERROR: Cannot start REST API on port %d (is another instance running?): %v\n", port, err)
+		os.Exit(1)
+	}
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
-	// Run server in a goroutine so it doesn't block
 	go func() {
-		if err := http.ListenAndServe(serverAddr, nil); err != nil {
+		if err := http.Serve(listener, nil); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
