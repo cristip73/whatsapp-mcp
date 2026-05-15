@@ -8,6 +8,7 @@ import requests
 import json
 import audio
 import os # Ensure os is imported
+import unicodedata
 
 # MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
@@ -75,6 +76,19 @@ class MessageContext:
     message: Message
     before: List[Message]
     after: List[Message]
+
+
+def _normalize_search_text(value: Optional[str]) -> str:
+    """Lowercase and strip diacritics for accent-insensitive search."""
+    if not value:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", value)
+    without_marks = "".join(
+        char for char in decomposed
+        if not unicodedata.combining(char)
+    )
+    return without_marks.casefold()
+
 
 def get_sender_name(sender_jid: str) -> str:
     try:
@@ -312,13 +326,14 @@ def _query_chatstorage_contacts(query_text: str) -> List[Contact]:
         return []
     try:
         conn = sqlite3.connect(f"file:{CHATSTORAGE_DB_PATH}?mode=ro", uri=True)
+        conn.create_function("normalize_search", 1, _normalize_search_text)
         cursor = conn.cursor()
 
-        pattern = f"%{query_text}%"
+        pattern = f"%{_normalize_search_text(query_text)}%"
         cursor.execute("""
             SELECT ZCONTACTJID, ZPARTNERNAME
             FROM ZWACHATSESSION
-            WHERE (LOWER(ZPARTNERNAME) LIKE LOWER(?) OR LOWER(ZCONTACTJID) LIKE LOWER(?))
+            WHERE (normalize_search(ZPARTNERNAME) LIKE ? OR normalize_search(ZCONTACTJID) LIKE ?)
               AND ZCONTACTJID NOT LIKE '%@g.us'
               AND ZCONTACTJID IS NOT NULL
             ORDER BY ZPARTNERNAME
@@ -667,18 +682,18 @@ def search_contacts(query: str) -> List[Contact]:
     """Search contacts by name or phone number."""
     try:
         conn = sqlite3.connect(get_messages_db_path())
+        conn.create_function("normalize_search", 1, _normalize_search_text)
         cursor = conn.cursor()
-        
-        # Split query into characters to support partial matching
-        search_pattern = '%' +query + '%'
-        
+
+        search_pattern = '%' + _normalize_search_text(query) + '%'
+
         cursor.execute("""
             SELECT DISTINCT 
                 jid,
                 name
             FROM chats
             WHERE 
-                (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
+                (normalize_search(name) LIKE ? OR normalize_search(jid) LIKE ?)
                 AND jid NOT LIKE '%@g.us'
             ORDER BY name, jid
             LIMIT 50
