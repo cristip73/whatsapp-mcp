@@ -385,6 +385,12 @@ def _deduplicate_chats_by_mapping(chats: List[Chat]) -> List[Chat]:
         cur = conn.cursor()
         cur.execute("SELECT lid_jid, pn_jid FROM jid_mappings")
         lid_to_pn = {row[0]: row[1] for row in cur.fetchall()}
+        pn_names = {}
+        for lid_jid, pn_jid in lid_to_pn.items():
+            cur.execute("SELECT name FROM chats WHERE jid = ?", (pn_jid,))
+            row = cur.fetchone()
+            if row and row[0]:
+                pn_names[pn_jid] = row[0]
         conn.close()
     except sqlite3.Error:
         return chats
@@ -392,10 +398,12 @@ def _deduplicate_chats_by_mapping(chats: List[Chat]) -> List[Chat]:
     canonical = {}
     for chat in chats:
         key = lid_to_pn.get(chat.jid, chat.jid)
+        if chat.jid in lid_to_pn and key in pn_names:
+            chat.name = pn_names[key]
         if key in canonical:
             existing = canonical[key]
             if chat.last_message_time and (not existing.last_message_time or chat.last_message_time > existing.last_message_time):
-                chat.name = existing.name or chat.name
+                chat.name = chat.name or existing.name
                 canonical[key] = chat
         else:
             canonical[key] = chat
