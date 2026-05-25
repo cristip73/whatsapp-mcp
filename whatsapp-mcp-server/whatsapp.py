@@ -1,4 +1,6 @@
 import sqlite3
+import subprocess
+import sys
 import time
 from datetime import datetime
 from dataclasses import dataclass
@@ -7,7 +9,7 @@ import os.path
 import requests
 import json
 import audio
-import os # Ensure os is imported
+import os
 import unicodedata
 
 # MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
@@ -164,9 +166,70 @@ def format_messages_list(messages: List[Message], show_chat_info: bool = True) -
         output += format_message(message, show_chat_info)
     return output
 
+def _resolve_jids(chat_jid: str) -> list:
+    """Return all known JIDs for a contact (PN + LID or vice versa)."""
+    jids = [chat_jid]
+    try:
+        conn = sqlite3.connect(get_messages_db_path())
+        cur = conn.cursor()
+        if chat_jid.endswith('@s.whatsapp.net'):
+            cur.execute("SELECT lid_jid FROM jid_mappings WHERE pn_jid = ?", (chat_jid,))
+            for row in cur.fetchall():
+                jids.append(row[0])
+        elif chat_jid.endswith('@lid'):
+            cur.execute("SELECT pn_jid FROM jid_mappings WHERE lid_jid = ?", (chat_jid,))
+            for row in cur.fetchall():
+                jids.append(row[0])
+        conn.close()
+    except sqlite3.Error:
+        pass
+    return jids
+
+
 def _chatstorage_available() -> bool:
     """Check if WhatsApp Desktop ChatStorage.sqlite exists and is readable."""
     return os.path.isfile(CHATSTORAGE_DB_PATH)
+
+
+_CHATSTORAGE_WORKER = '''
+import sqlite3, json, sys, os
+APPLE_EPOCH = 978307200
+params = json.loads(sys.argv[1])
+path = os.path.expanduser("~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite")
+conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=2)
+cur = conn.cursor()
+sql_parts = ["""SELECT ZMESSAGEDATE, ZISFROMME, ZFROMJID, ZTEXT,
+    cs.ZCONTACTJID, cs.ZPARTNERNAME, m.ZSTANZAID, m.ZMESSAGETYPE
+    FROM ZWAMESSAGE m JOIN ZWACHATSESSION cs ON m.ZCHATSESSION = cs.Z_PK"""]
+where, p = [], []
+if params.get("chat_jid"):
+    where.append("cs.ZCONTACTJID = ?"); p.append(params["chat_jid"])
+if params.get("after_ts"):
+    where.append("m.ZMESSAGEDATE > ?"); p.append(params["after_ts"] - APPLE_EPOCH)
+if params.get("before_ts"):
+    where.append("m.ZMESSAGEDATE < ?"); p.append(params["before_ts"] - APPLE_EPOCH)
+if params.get("query_text"):
+    where.append("LOWER(m.ZTEXT) LIKE LOWER(?)"); p.append(f"%{params['query_text']}%")
+where += ["m.ZTEXT IS NOT NULL", "m.ZMESSAGETYPE IN (0, 1, 2, 3, 5)"]
+sql_parts.append("WHERE " + " AND ".join(where))
+sql_parts.append("ORDER BY m.ZMESSAGEDATE DESC")
+sql_parts.append("LIMIT ? OFFSET ?")
+p += [params.get("limit", 20), params.get("page", 0) * params.get("limit", 20)]
+cur.execute(" ".join(sql_parts), tuple(p))
+rows = cur.fetchall()
+conn.close()
+media_map = {0: None, 1: "image", 2: "video", 3: "audio", 5: "document"}
+out = []
+for r in rows:
+    ts = r[0] + APPLE_EPOCH if r[0] else 0
+    media = media_map.get(r[7])
+    out.append({"timestamp": ts, "is_from_me": bool(r[1]),
+        "sender": r[2] if r[2] and not r[1] else (r[4] or ""),
+        "content": r[3] or (f"[{media}]" if media else ""),
+        "chat_jid": r[4] or "", "id": r[6] or f"cs_{int(ts)}",
+        "chat_name": r[5], "media_type": media})
+print(json.dumps(out))
+'''
 
 
 def _query_chatstorage_messages(
@@ -177,85 +240,37 @@ def _query_chatstorage_messages(
     limit: int = 20,
     page: int = 0,
 ) -> List[Message]:
-    """Query WhatsApp Desktop ChatStorage.sqlite for messages. Returns Message objects."""
+    """Query WhatsApp Desktop ChatStorage.sqlite in subprocess with timeout."""
     if not _chatstorage_available():
         return []
+    params = {"limit": limit, "page": page}
+    if chat_jid:
+        params["chat_jid"] = chat_jid
+    if after:
+        params["after_ts"] = after.timestamp()
+    if before:
+        params["before_ts"] = before.timestamp()
+    if query_text:
+        params["query_text"] = query_text
     try:
-        conn = sqlite3.connect(f"file:{CHATSTORAGE_DB_PATH}?mode=ro", uri=True)
-        cursor = conn.cursor()
-
-        sql_parts = ["""
-            SELECT
-                ZMESSAGEDATE,
-                ZISFROMME,
-                ZFROMJID,
-                ZTEXT,
-                cs.ZCONTACTJID,
-                cs.ZPARTNERNAME,
-                m.ZSTANZAID,
-                m.ZMESSAGETYPE
-            FROM ZWAMESSAGE m
-            JOIN ZWACHATSESSION cs ON m.ZCHATSESSION = cs.Z_PK
-        """]
-        where = []
-        params = []
-
-        if chat_jid:
-            where.append("cs.ZCONTACTJID = ?")
-            params.append(chat_jid)
-        if after:
-            apple_ts = after.timestamp() - APPLE_EPOCH_OFFSET
-            where.append("m.ZMESSAGEDATE > ?")
-            params.append(apple_ts)
-        if before:
-            apple_ts = before.timestamp() - APPLE_EPOCH_OFFSET
-            where.append("m.ZMESSAGEDATE < ?")
-            params.append(apple_ts)
-        if query_text:
-            where.append("LOWER(m.ZTEXT) LIKE LOWER(?)")
-            params.append(f"%{query_text}%")
-
-        # Exclude system messages (type 6 = group events, etc.)
-        where.append("m.ZTEXT IS NOT NULL")
-        where.append("m.ZMESSAGETYPE IN (0, 1, 2, 3, 5)")  # text, image, video, audio, document
-
-        if where:
-            sql_parts.append("WHERE " + " AND ".join(where))
-
-        offset = page * limit
-        sql_parts.append("ORDER BY m.ZMESSAGEDATE DESC")
-        sql_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
-
-        cursor.execute(" ".join(sql_parts), tuple(params))
-        rows = cursor.fetchall()
-
-        result = []
-        for row in rows:
-            msg_date_apple, is_from_me, from_jid, text, contact_jid, partner_name, stanza_id, msg_type = row
-            unix_ts = msg_date_apple + APPLE_EPOCH_OFFSET if msg_date_apple else 0
-            ts = datetime.fromtimestamp(unix_ts)
-
-            media_map = {0: None, 1: "image", 2: "video", 3: "audio", 5: "document"}
-            media = media_map.get(msg_type)
-
-            result.append(Message(
-                timestamp=ts,
-                sender=from_jid if from_jid and not is_from_me else (contact_jid or ""),
-                content=text or (f"[{media}]" if media else ""),
-                is_from_me=bool(is_from_me),
-                chat_jid=contact_jid or "",
-                id=stanza_id or f"cs_{int(unix_ts)}",
-                chat_name=partner_name,
-                media_type=media,
-            ))
-        return result
-    except sqlite3.Error as e:
+        result = subprocess.run(
+            [sys.executable, "-c", _CHATSTORAGE_WORKER, json.dumps(params)],
+            capture_output=True, timeout=3, text=True
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            rows = json.loads(result.stdout)
+            return [Message(
+                timestamp=datetime.fromtimestamp(r["timestamp"]),
+                sender=r["sender"], content=r["content"],
+                is_from_me=r["is_from_me"], chat_jid=r["chat_jid"],
+                id=r["id"], chat_name=r.get("chat_name"),
+                media_type=r.get("media_type"),
+            ) for r in rows]
+    except subprocess.TimeoutExpired:
+        print("ChatStorage fallback timed out (subprocess killed)")
+    except Exception as e:
         print(f"ChatStorage fallback error: {e}")
-        return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
+    return []
 
 
 def _query_chatstorage_chats(
@@ -363,6 +378,30 @@ def _normalize_timestamp(ts: datetime) -> datetime:
     return ts
 
 
+def _deduplicate_chats_by_mapping(chats: List[Chat]) -> List[Chat]:
+    """Merge chats that are the same contact under different JIDs (PN vs LID)."""
+    try:
+        conn = sqlite3.connect(get_messages_db_path())
+        cur = conn.cursor()
+        cur.execute("SELECT lid_jid, pn_jid FROM jid_mappings")
+        lid_to_pn = {row[0]: row[1] for row in cur.fetchall()}
+        conn.close()
+    except sqlite3.Error:
+        return chats
+
+    canonical = {}
+    for chat in chats:
+        key = lid_to_pn.get(chat.jid, chat.jid)
+        if key in canonical:
+            existing = canonical[key]
+            if chat.last_message_time and (not existing.last_message_time or chat.last_message_time > existing.last_message_time):
+                chat.name = existing.name or chat.name
+                canonical[key] = chat
+        else:
+            canonical[key] = chat
+    return sorted(canonical.values(), key=lambda c: c.last_message_time or datetime.min, reverse=True)
+
+
 def _merge_messages(primary: List[Message], fallback: List[Message]) -> List[Message]:
     """Merge two message lists, dedup by id, sort by timestamp DESC."""
     seen_ids = set()
@@ -426,13 +465,15 @@ def list_messages(
             params.append(sender_phone_number)
             
         if chat_jid:
-            where_clauses.append("messages.chat_jid = ?")
-            params.append(chat_jid)
-            
+            all_jids = _resolve_jids(chat_jid)
+            placeholders = ",".join("?" * len(all_jids))
+            where_clauses.append(f"messages.chat_jid IN ({placeholders})")
+            params.extend(all_jids)
+
         if query:
             where_clauses.append("LOWER(messages.content) LIKE LOWER(?)")
             params.append(f"%{query}%")
-            
+
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
             
@@ -671,6 +712,9 @@ def list_chats(
         if 'conn' in locals():
             conn.close()
 
+    # Deduplicate PN/LID chats that map to the same contact
+    result = _deduplicate_chats_by_mapping(result)
+
     # ChatStorage fallback for chats
     if not result and _chatstorage_available():
         result = _query_chatstorage_chats(query_text=query, limit=limit, page=page)
@@ -736,7 +780,9 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
         conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
         
-        cursor.execute("""
+        all_jids = _resolve_jids(jid)
+        placeholders = ",".join("?" * len(all_jids))
+        cursor.execute(f"""
             SELECT DISTINCT
                 c.jid,
                 c.name,
@@ -746,10 +792,10 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
                 m.is_from_me as last_is_from_me
             FROM chats c
             JOIN messages m ON c.jid = m.chat_jid
-            WHERE m.sender = ? OR c.jid = ?
+            WHERE m.sender IN ({placeholders}) OR c.jid IN ({placeholders})
             ORDER BY c.last_message_time DESC
             LIMIT ? OFFSET ?
-        """, (jid, jid, limit, page * limit))
+        """, tuple(all_jids + all_jids + [limit, page * limit]))
         
         chats = cursor.fetchall()
         
@@ -1379,8 +1425,10 @@ def get_last_interaction(jid: str) -> str:
         conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
         
-        cursor.execute("""
-            SELECT 
+        all_jids = _resolve_jids(jid)
+        placeholders = ",".join("?" * len(all_jids))
+        cursor.execute(f"""
+            SELECT
                 m.timestamp,
                 m.sender,
                 c.name,
@@ -1391,10 +1439,10 @@ def get_last_interaction(jid: str) -> str:
                 m.media_type
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.sender = ? OR c.jid = ?
+            WHERE m.sender IN ({placeholders}) OR c.jid IN ({placeholders})
             ORDER BY m.timestamp DESC
             LIMIT 1
-        """, (jid, jid))
+        """, tuple(all_jids + all_jids))
         
         msg_data = cursor.fetchone()
         

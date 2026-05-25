@@ -99,6 +99,13 @@ func NewMessageStore(storagePath string) (*MessageStore, error) {
 		CREATE INDEX IF NOT EXISTS idx_messages_chat_timestamp ON messages(chat_jid, timestamp);
 		CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender);
 		CREATE INDEX IF NOT EXISTS idx_chats_name ON chats(name);
+
+		CREATE TABLE IF NOT EXISTS jid_mappings (
+			lid_jid TEXT PRIMARY KEY,
+			pn_jid TEXT NOT NULL UNIQUE,
+			source TEXT DEFAULT 'event',
+			updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+		);
 	`)
 	if err != nil {
 		db.Close()
@@ -111,6 +118,27 @@ func NewMessageStore(storagePath string) (*MessageStore, error) {
 // Close the database connection
 func (store *MessageStore) Close() error {
 	return store.db.Close()
+}
+
+// StoreLIDMapping persists a LID<->PN pair, cleaning stale mappings transactionally.
+func (store *MessageStore) StoreLIDMapping(lidJID, pnJID, source string) error {
+	tx, err := store.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	tx.Exec("DELETE FROM jid_mappings WHERE pn_jid = ? AND lid_jid != ?", pnJID, lidJID)
+	tx.Exec("DELETE FROM jid_mappings WHERE lid_jid = ? AND pn_jid != ?", lidJID, pnJID)
+	_, err = tx.Exec(
+		`INSERT INTO jid_mappings (lid_jid, pn_jid, source, updated_at)
+		 VALUES (?, ?, ?, datetime('now'))
+		 ON CONFLICT(lid_jid) DO UPDATE SET pn_jid = ?, source = ?, updated_at = datetime('now')`,
+		lidJID, pnJID, source, pnJID, source,
+	)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Store a chat in the database
@@ -1231,10 +1259,46 @@ func extractMediaInfo(msg *waProto.Message, messageID string) (mediaType string,
 }
 
 // Handle regular incoming messages with media support
+func storeLIDMappingsFromEvent(client *whatsmeow.Client, store *MessageStore, src types.MessageSource, logger waLog.Logger) {
+	pairs := [][2]types.JID{
+		{src.Chat, src.RecipientAlt},
+		{src.Sender, src.SenderAlt},
+	}
+	for _, pair := range pairs {
+		a, b := pair[0], pair[1]
+		if a.IsEmpty() || b.IsEmpty() {
+			continue
+		}
+		var lid, pn types.JID
+		if a.Server == types.HiddenUserServer && b.Server == types.DefaultUserServer {
+			lid, pn = a, b
+		} else if b.Server == types.HiddenUserServer && a.Server == types.DefaultUserServer {
+			lid, pn = b, a
+		} else {
+			continue
+		}
+		if err := store.StoreLIDMapping(lid.String(), pn.String(), "event_alt"); err != nil {
+			logger.Warnf("LID mapping from event alt %s -> %s: %v", lid, pn, err)
+		}
+	}
+
+	if src.Chat.Server == types.HiddenUserServer {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		pn, err := client.Store.LIDs.GetPNForLID(ctx, src.Chat)
+		if err == nil && !pn.IsEmpty() && pn.Server == types.DefaultUserServer {
+			store.StoreLIDMapping(src.Chat.String(), pn.String(), "store_lids")
+		}
+	}
+}
+
 func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
 	// Save message to database
 	chatJID := msg.Info.Chat.String()
 	sender := msg.Info.Sender.User
+
+	// Extract LID<->PN mappings from event metadata
+	storeLIDMappingsFromEvent(client, messageStore, msg.Info.MessageSource, logger)
 
 	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
 	name := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
@@ -2700,6 +2764,9 @@ func main() {
 
 	// History sync happens automatically via whatsmeow on connect
 
+	// Backfill LID->PN mappings from whatsmeow's internal store
+	backfillLIDMappings(client, messageStore, logger)
+
 	// Start REST API server
 	startRESTServer(client, messageStore, 8080)
 
@@ -2715,6 +2782,37 @@ func main() {
 	fmt.Println("Disconnecting...")
 	// Disconnect client
 	client.Disconnect()
+}
+
+func backfillLIDMappings(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger) {
+	rows, err := store.db.Query("SELECT DISTINCT jid FROM chats WHERE jid LIKE '%@lid'")
+	if err != nil {
+		logger.Warnf("Backfill: failed to query LID chats: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		var lidStr string
+		if err := rows.Scan(&lidStr); err != nil {
+			continue
+		}
+		lid, err := types.ParseJID(lidStr)
+		if err != nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		pn, err := client.Store.LIDs.GetPNForLID(ctx, lid)
+		cancel()
+		if err == nil && !pn.IsEmpty() && pn.Server == types.DefaultUserServer {
+			if store.StoreLIDMapping(lid.String(), pn.String(), "backfill") == nil {
+				count++
+				logger.Infof("Backfill: %s -> %s", lid, pn)
+			}
+		}
+	}
+	fmt.Printf("Backfill: seeded %d LID->PN mappings from whatsmeow store\n", count)
 }
 
 // GetChatName determines the appropriate name for a chat based on JID and other info
