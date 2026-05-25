@@ -96,39 +96,39 @@ def get_sender_name(sender_jid: str) -> str:
     try:
         conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
-        
+
         # First try matching by exact JID
-        cursor.execute("""
-            SELECT name
-            FROM chats
-            WHERE jid = ?
-            LIMIT 1
-        """, (sender_jid,))
-        
+        cursor.execute("SELECT name FROM chats WHERE jid = ? LIMIT 1", (sender_jid,))
         result = cursor.fetchone()
-        
-        # If no result, try looking for the number within JIDs
+
+        # If sender is a LID (with or without @lid suffix), resolve to PN name
         if not result:
-            # Extract the phone number part if it's a JID
+            lid_full = sender_jid if '@' in sender_jid else sender_jid + '@lid'
+            cursor.execute("""
+                SELECT c.name FROM jid_mappings m
+                JOIN chats c ON c.jid = m.pn_jid
+                WHERE m.lid_jid = ? LIMIT 1
+            """, (lid_full,))
+            result = cursor.fetchone()
+
+        # Fallback: try looking for the number within JIDs
+        if not result:
             if '@' in sender_jid:
                 phone_part = sender_jid.split('@')[0]
             else:
                 phone_part = sender_jid
-                
             cursor.execute("""
-                SELECT name
-                FROM chats
+                SELECT name FROM chats
                 WHERE jid LIKE ? AND jid NOT LIKE '%@g.us'
                 LIMIT 1
             """, (f"%{phone_part}%",))
-            
             result = cursor.fetchone()
-        
+
         if result and result[0]:
             return result[0]
         else:
             return sender_jid
-        
+
     except sqlite3.Error as e:
         print(f"Database error while getting sender name: {e}")
         return sender_jid
