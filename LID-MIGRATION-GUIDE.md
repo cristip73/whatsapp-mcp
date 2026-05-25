@@ -81,25 +81,66 @@ sqlite3 /Users/$USER/CLAUDE/whatsapp-media/messages.db "SELECT lid_jid, pn_jid F
 
 ### 5. Verificati ca MCP server-ul functioneaza
 
+Alege varianta ta (mcpl SAU MCP nativ Claude Code):
+
+**Varianta A - mcpl (Launchpad):**
+
 ```bash
 # Status bridge
 mcpl call --no-daemon whatsapp connection '{"action":"status"}'
 
-# Mesaje de la un contact (folositi numarul vechi - ar trebui sa gaseasca si mesajele LID)
+# Mesaje de la un contact (folositi un numar real din contactele voastre)
 mcpl call --no-daemon whatsapp list_messages '{"chat_jid":"40720666029@s.whatsapp.net","limit":3,"include_context":false}'
 
 # Lista chat-uri (LID chats ar trebui sa arate cu nume umane, nu numere)
 mcpl call --no-daemon whatsapp list_chats '{"limit":5}'
 ```
 
-### 6. Restart MCPL daemon (optional)
+**Varianta B - MCP nativ (din Claude Code / .mcp.json):**
 
-Daca folositi mcpl cu daemon (fara `--no-daemon`), restartati daemon-ul ca sa preia noul whatsapp-mcp-server:
+Daca folositi whatsapp-mcp ca server MCP nativ (configurat in `.mcp.json` sau in Claude Code settings), nu aveti nevoie de mcpl. Testati direct din Claude Code:
+
+```
+# In conversatia cu Claude Code, cereti:
+"verifica statusul WhatsApp"
+"arata-mi ultimele mesaje de la [contact]"
+"listeaza chat-urile recente"
+```
+
+Sau testati direct cu MCP tools daca le aveti expuse:
+
+```bash
+# Lista tool-urile disponibile pe serverul whatsapp
+# (depinde de cum e configurat in .mcp.json)
+```
+
+Daca serverul e configurat in `.mcp.json`, Claude Code il porneste automat. Asigurati-va ca path-ul din config pointeaza la repo-ul updatat:
+
+```json
+{
+  "mcpServers": {
+    "whatsapp": {
+      "command": "/opt/homebrew/bin/uv",
+      "args": ["run", "--directory", "/PATH/CATRE/whatsapp-mcp/whatsapp-mcp-server", "main.py", "--attachments-path", "/Users/$USER/CLAUDE/whatsapp-media"]
+    }
+  }
+}
+```
+
+Dupa pull, **restartati Claude Code** (sau faceti `/mcp` > restart server) ca sa preia codul Python nou.
+
+### 6. Restart daemon / server (dupa pull)
+
+**mcpl:** Restartati daemon-ul ca sa preia noul whatsapp-mcp-server:
 
 ```bash
 mcpl session stop
 # La urmatorul mcpl call, daemon-ul porneste automat
 ```
+
+**MCP nativ Claude Code:** Restartati serverul MCP:
+- In Claude Code: `/mcp` > selectati whatsapp > restart
+- Sau restartati Claude Code complet
 
 ## Ce se intampla automat
 
