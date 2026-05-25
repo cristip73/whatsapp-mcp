@@ -2764,8 +2764,8 @@ func main() {
 
 	// History sync happens automatically via whatsmeow on connect
 
-	// Backfill LID->PN mappings from whatsmeow's internal store
-	backfillLIDMappings(client, messageStore, logger)
+	// Backfill LID->PN mappings in background (don't block REST server)
+	go backfillLIDMappings(client, messageStore, logger)
 
 	// Start REST API server
 	startRESTServer(client, messageStore, 8080)
@@ -2785,6 +2785,10 @@ func main() {
 }
 
 func backfillLIDMappings(client *whatsmeow.Client, store *MessageStore, logger waLog.Logger) {
+	// Wait for history sync to populate Store.LIDs
+	time.Sleep(10 * time.Second)
+	fmt.Println("Backfill: starting LID->PN mapping scan...")
+
 	rows, err := store.db.Query("SELECT DISTINCT jid FROM chats WHERE jid LIKE '%@lid'")
 	if err != nil {
 		logger.Warnf("Backfill: failed to query LID chats: %v", err)
@@ -2792,12 +2796,17 @@ func backfillLIDMappings(client *whatsmeow.Client, store *MessageStore, logger w
 	}
 	defer rows.Close()
 
-	count := 0
+	var lids []string
 	for rows.Next() {
 		var lidStr string
-		if err := rows.Scan(&lidStr); err != nil {
-			continue
+		if err := rows.Scan(&lidStr); err == nil {
+			lids = append(lids, lidStr)
 		}
+	}
+	fmt.Printf("Backfill: found %d LID chats to resolve\n", len(lids))
+
+	count := 0
+	for _, lidStr := range lids {
 		lid, err := types.ParseJID(lidStr)
 		if err != nil {
 			continue
@@ -2808,11 +2817,11 @@ func backfillLIDMappings(client *whatsmeow.Client, store *MessageStore, logger w
 		if err == nil && !pn.IsEmpty() && pn.Server == types.DefaultUserServer {
 			if store.StoreLIDMapping(lid.String(), pn.String(), "backfill") == nil {
 				count++
-				logger.Infof("Backfill: %s -> %s", lid, pn)
+				fmt.Printf("Backfill: %s -> %s\n", lid, pn)
 			}
 		}
 	}
-	fmt.Printf("Backfill: seeded %d LID->PN mappings from whatsmeow store\n", count)
+	fmt.Printf("Backfill: seeded %d/%d LID->PN mappings from whatsmeow store\n", count, len(lids))
 }
 
 // GetChatName determines the appropriate name for a chat based on JID and other info
