@@ -167,6 +167,15 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 	return err
 }
 
+// Delete a message from the local database (used after a revoke to clear the local copy)
+func (store *MessageStore) DeleteMessageByID(id, chatJID string) error {
+	_, err := store.db.Exec(
+		`DELETE FROM messages WHERE id = ? AND chat_jid = ?`,
+		id, chatJID,
+	)
+	return err
+}
+
 // Get messages from a chat
 func (store *MessageStore) GetMessages(chatJID string, limit int) ([]Message, error) {
 	rows, err := store.db.Query(
@@ -933,7 +942,7 @@ func editMessage(client *whatsmeow.Client, chatJID, messageID, newText string) (
 	return true, "message edited"
 }
 
-func deleteMessage(client *whatsmeow.Client, chatJID, senderJID, messageID string) (bool, string) {
+func deleteMessage(client *whatsmeow.Client, messageStore *MessageStore, chatJID, senderJID, messageID string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "not connected to WhatsApp"
 	}
@@ -954,6 +963,10 @@ func deleteMessage(client *whatsmeow.Client, chatJID, senderJID, messageID strin
 	_, err = client.SendMessage(context.Background(), chat, msg)
 	if err != nil {
 		return false, fmt.Sprintf("failed to delete message: %v", err)
+	}
+	// Revoke succeeded on WhatsApp - also drop the local copy so the text doesn't persist in the DB
+	if delErr := messageStore.DeleteMessageByID(messageID, chatJID); delErr != nil {
+		fmt.Printf("Warning: revoke sent but failed to delete local copy of %s: %v\n", messageID, delErr)
 	}
 	return true, "message deleted"
 }
@@ -1296,6 +1309,20 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Save message to database
 	chatJID := msg.Info.Chat.String()
 	sender := msg.Info.Sender.User
+
+	// If this is a REVOKE (a message was deleted for everyone), drop the local copy and stop.
+	// Covers revokes received from others and revokes done from another linked device.
+	if pm := msg.Message.GetProtocolMessage(); pm != nil && pm.GetType() == waProto.ProtocolMessage_REVOKE {
+		targetID := pm.GetKey().GetID()
+		if targetID != "" {
+			if err := messageStore.DeleteMessageByID(targetID, chatJID); err != nil {
+				logger.Warnf("Failed to delete revoked message %s locally: %v", targetID, err)
+			} else {
+				logger.Infof("Revoked message %s removed from local DB", targetID)
+			}
+		}
+		return
+	}
 
 	// Extract LID<->PN mappings from event metadata
 	storeLIDMappingsFromEvent(client, messageStore, msg.Info.MessageSource, logger)
@@ -2287,7 +2314,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			http.Error(w, "chat_jid and message_id are required", http.StatusBadRequest)
 			return
 		}
-		success, msg := deleteMessage(client, req.ChatJID, req.SenderJID, req.MessageID)
+		success, msg := deleteMessage(client, messageStore, req.ChatJID, req.SenderJID, req.MessageID)
 		w.Header().Set("Content-Type", "application/json")
 		if !success {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -2558,9 +2585,14 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		w.Header().Set("Content-Type", "application/json")
 		isConnected := client.IsConnected()
 		isLoggedIn := client.Store.ID != nil
+		ownJID := ""
+		if client.Store.ID != nil {
+			ownJID = client.Store.ID.ToNonAD().String() // clean form without :device suffix (e.g. 40720900690@s.whatsapp.net)
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"connected": isConnected,
 			"logged_in": isLoggedIn,
+			"own_jid":   ownJID,
 		})
 	})
 
