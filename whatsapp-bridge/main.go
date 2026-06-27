@@ -25,6 +25,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
@@ -2856,6 +2857,18 @@ func backfillLIDMappings(client *whatsmeow.Client, store *MessageStore, logger w
 	fmt.Printf("Backfill: seeded %d/%d LID->PN mappings from whatsmeow store\n", count, len(lids))
 }
 
+// isRealName reports whether s looks like a human-readable name rather than a
+// bare identifier (a LID or a phone number). It requires at least one letter,
+// which rejects all-numeric "names" such as "169440771625138" or "40720900690".
+func isRealName(s string) bool {
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // GetChatName determines the appropriate name for a chat based on JID and other info
 func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types.JID, chatJID string, conversation interface{}, sender string, logger waLog.Logger) string {
 	// First, check if chat already exists in database with a name
@@ -2921,15 +2934,36 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		// This is an individual contact
 		logger.Infof("Getting name for contact: %s", chatJID)
 
-		// Just use contact info (full name)
+		// Prefer the contact's real full name from whatsmeow's contact store.
 		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
-		if err == nil && contact.FullName != "" {
+		if err == nil && isRealName(contact.FullName) {
 			name = contact.FullName
-		} else if sender != "" {
-			// Fallback to sender
-			name = sender
-		} else {
-			// Last fallback to JID
+		} else if jid.Server == types.HiddenUserServer {
+			// New @lid contact with no stored name. Resolve LID -> PN via the
+			// jid_mappings table and reuse the real name already on the PN chat
+			// row. We must NEVER fall back to the message `sender` here: for an
+			// OUTGOING message `sender` is the OWNER's own LID, so doing so would
+			// overwrite the other party's chat name with our own number -- this
+			// is the @lid chat-name corruption bug this branch fixes.
+			var pnJID string
+			if e := messageStore.db.QueryRow(
+				"SELECT pn_jid FROM jid_mappings WHERE lid_jid = ?", chatJID,
+			).Scan(&pnJID); e == nil && pnJID != "" {
+				var pnName string
+				if e := messageStore.db.QueryRow(
+					"SELECT name FROM chats WHERE jid = ?", pnJID,
+				).Scan(&pnName); e == nil && isRealName(pnName) {
+					name = pnName
+				} else if pn, e := types.ParseJID(pnJID); e == nil && pn.User != "" {
+					// No real name yet, but the phone number beats a bare LID.
+					name = pn.User
+				}
+			}
+		}
+
+		// Absolute last resort: the chat's own JID user part (the phone number
+		// for a PN chat, the LID for an unresolved @lid chat). Never the sender.
+		if name == "" {
 			name = jid.User
 		}
 

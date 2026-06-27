@@ -92,56 +92,87 @@ def _normalize_search_text(value: Optional[str]) -> str:
     return without_marks.casefold()
 
 
+# In-process cache for resolved names (LID/JID -> display name). Avoids a fresh
+# DB connection + queries on every message for senders we've already resolved.
+# Lives for the server process lifetime; cleared on restart.
+_SENDER_NAME_CACHE: dict = {}
+
+
+def _is_real_name(s) -> bool:
+    """A real contact name contains at least one letter. The bridge sometimes
+    stores chats.name as a bare LID/phone number (corrupted during the WhatsApp
+    @lid migration, e.g. when you start a new chat the outgoing sender's own LID
+    gets written as the chat name). Such numeric 'names' must be rejected."""
+    return bool(s) and any(c.isalpha() for c in str(s))
+
+
 def get_sender_name(sender_jid: str) -> str:
+    if not sender_jid:
+        return sender_jid
+    if sender_jid in _SENDER_NAME_CACHE:
+        return _SENDER_NAME_CACHE[sender_jid]
+
+    result_name = sender_jid
+    conn = None
     try:
         conn = sqlite3.connect(get_messages_db_path())
         cursor = conn.cursor()
+        phone_part = sender_jid.split('@')[0] if '@' in sender_jid else sender_jid
 
-        # First try matching by exact JID
+        # 1) Exact JID in chats - but only accept a REAL name (with letters).
+        #    A numeric chats.name is a corrupted LID, so we ignore it and resolve below.
         cursor.execute("SELECT name FROM chats WHERE jid = ? LIMIT 1", (sender_jid,))
-        result = cursor.fetchone()
-
-        # If sender is a LID (with or without @lid suffix), resolve to PN name
-        if not result:
-            lid_full = sender_jid if '@' in sender_jid else sender_jid + '@lid'
-            cursor.execute("""
-                SELECT c.name FROM jid_mappings m
-                JOIN chats c ON c.jid = m.pn_jid
-                WHERE m.lid_jid = ? LIMIT 1
-            """, (lid_full,))
-            result = cursor.fetchone()
-
-        # Fallback: try looking for the number within JIDs
-        if not result:
-            if '@' in sender_jid:
-                phone_part = sender_jid.split('@')[0]
-            else:
-                phone_part = sender_jid
-            cursor.execute("""
-                SELECT name FROM chats
-                WHERE jid LIKE ? AND jid NOT LIKE '%@g.us'
-                LIMIT 1
-            """, (f"%{phone_part}%",))
-            result = cursor.fetchone()
-
-        if result and result[0]:
-            return result[0]
+        row = cursor.fetchone()
+        if row and _is_real_name(row[0]):
+            result_name = row[0]
         else:
-            return sender_jid
+            # 2) LID -> PN: resolve the mapping FIRST (no inner join - the PN chat
+            #    row may not exist even when the mapping does), then look up its
+            #    real name separately. Prefer the PN's real name; else the PN
+            #    number (still better than a bare LID).
+            lid_full = sender_jid if '@' in sender_jid else sender_jid + '@lid'
+            cursor.execute("SELECT pn_jid FROM jid_mappings WHERE lid_jid = ? LIMIT 1", (lid_full,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                pn_jid = row[0]
+                cursor.execute("SELECT name FROM chats WHERE jid = ? LIMIT 1", (pn_jid,))
+                nrow = cursor.fetchone()
+                if nrow and _is_real_name(nrow[0]):
+                    result_name = nrow[0]
+                else:
+                    result_name = pn_jid.split('@')[0]  # real PN number, better than a LID
+            else:
+                # 3) Fallback: any 1:1 chat whose JID contains this number, with a real name.
+                cursor.execute("""
+                    SELECT name FROM chats
+                    WHERE jid LIKE ? AND jid NOT LIKE '%@g.us'
+                    LIMIT 1
+                """, (f"%{phone_part}%",))
+                nrow = cursor.fetchone()
+                if nrow and _is_real_name(nrow[0]):
+                    result_name = nrow[0]
+                else:
+                    result_name = phone_part
 
     except sqlite3.Error as e:
         print(f"Database error while getting sender name: {e}")
-        return sender_jid
+        result_name = sender_jid
     finally:
-        if 'conn' in locals():
+        if conn is not None:
             conn.close()
+
+    _SENDER_NAME_CACHE[sender_jid] = result_name
+    return result_name
 
 def format_message(message: Message, show_chat_info: bool = True) -> None:
     """Print a single message with consistent formatting."""
     output = ""
     
     if show_chat_info and message.chat_name:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] [ID: {message.id}] Chat: {message.chat_name} "
+        # chats.name can be a corrupted numeric LID for @lid chats - resolve it
+        # the same way we resolve senders (LID -> PN real name).
+        chat_display = message.chat_name if _is_real_name(message.chat_name) else get_sender_name(message.chat_jid)
+        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] [ID: {message.id}] Chat: {chat_display} "
     else:
         output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] [ID: {message.id}] "
 
