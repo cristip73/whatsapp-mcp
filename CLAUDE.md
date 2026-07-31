@@ -27,6 +27,8 @@ go build -o whatsapp-bridge main.go          # Build
 ./whatsapp-bridge -storage-path="$HOME/CLAUDE/whatsapp-media"  # Run
 ```
 
+> ⚠️ **macOS + launchd: never let the launchd plist point at a binary inside `~/Downloads`, `~/Desktop` or `~/Documents`.** After a rebuild, a binary in those TCC-protected folders hangs forever in `dyld` (`open()` of its own binary) when started by launchd - process alive, no stdout, never binds `:8080`. It runs fine from a terminal, which makes it confusing. On THIS machine the launchd binary lives at `~/CLAUDE/whatsapp-bridge/whatsapp-bridge`, so after `go build` in the repo you must `cp` it there before `launchctl bootstrap`. See README.md → "macOS gotcha".
+
 ### Python MCP Server
 ```bash
 cd whatsapp-mcp-server

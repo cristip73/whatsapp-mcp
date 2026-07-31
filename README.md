@@ -124,6 +124,17 @@ Set up `launchd` so the bridge starts on login, restarts on crash, and runs inde
 
 Replace all occurrences of `YOUR_USERNAME` and adjust the repo path. All paths must be **absolute** (no `~` or `$HOME`).
 
+> ⚠️ **macOS gotcha - do NOT run the binary from a TCC-protected folder (`~/Downloads`, `~/Desktop`, `~/Documents`).**
+> A freshly rebuilt binary gets a new code hash + a `com.apple.provenance` xattr, which triggers a synchronous Gatekeeper/TCC assessment on first launch. A `launchctl` agent has no GUI session to approve it, so the process **hangs forever in `dyld` while opening its own binary** (it never reaches `main()`, never binds `:8080`, and prints nothing). The exact same binary works instantly when run from a Terminal (your shell already has folder access) - which makes this very confusing to debug.
+> **Fix:** install the runtime binary outside those folders and point the plist there. After every rebuild, copy it into place:
+> ```bash
+> cd whatsapp-bridge && go build -o whatsapp-bridge main.go
+> launchctl bootout gui/$(id -u)/com.whatsapp-bridge
+> cp whatsapp-bridge ~/path/outside/Downloads/whatsapp-bridge   # ← keep the launchd target out of protected folders
+> launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.whatsapp-bridge.plist
+> ```
+> If you clone the repo into `~/Code` (or anywhere unprotected), none of this applies - run straight from the repo.
+
 **Start the service:**
 
 ```bash
