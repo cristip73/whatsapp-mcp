@@ -27,7 +27,19 @@ go build -o whatsapp-bridge main.go          # Build
 ./whatsapp-bridge -storage-path="$HOME/CLAUDE/whatsapp-media"  # Run
 ```
 
-> ⚠️ **macOS + launchd: never let the launchd plist point at a binary inside `~/Downloads`, `~/Desktop` or `~/Documents`.** After a rebuild, a binary in those TCC-protected folders hangs forever in `dyld` (`open()` of its own binary) when started by launchd - process alive, no stdout, never binds `:8080`. It runs fine from a terminal, which makes it confusing. On THIS machine the launchd binary lives at `~/CLAUDE/whatsapp-bridge/whatsapp-bridge`, so after `go build` in the repo you must `cp` it there before `launchctl bootstrap`. See README.md → "macOS gotcha".
+> ⚠️ **macOS + launchd: never let the launchd plist point at a binary inside `~/Downloads`, `~/Desktop` or `~/Documents`.** After a rebuild, a binary in those TCC-protected folders hangs forever in `dyld` (`open()` of its own binary) when started by launchd - process alive, no stdout, never binds `:8080`. It runs fine from a terminal, which makes it confusing. See README.md → "macOS gotcha".
+
+### Deployments (two machines, different layouts)
+
+| | MacBook Pro (`cristi`) | Mac mini (`ks1`, server) |
+|---|---|---|
+| Runtime binary | `~/CLAUDE/whatsapp-bridge/whatsapp-bridge` | `~/.local/bin/whatsapp-bridge` |
+| Data (`whatsapp.db`, `messages.db`, media) | `~/CLAUDE/whatsapp-media/` | `~/.local/share/whatsapp/` (chmod 700) |
+| launchd | LaunchAgent `~/Library/LaunchAgents/com.kilostop.whatsapp-bridge.plist` (`gui/$(id -u)`) | **system LaunchDaemon** `/Library/LaunchDaemons/com.kilostop.whatsapp-bridge.plist`, `UserName ks1` - the mini has no GUI login, LaunchAgents never load there |
+| WhatsApp device | `:61` | `:63` (separate linked device, own QR) |
+| Restart | `launchctl kickstart -k gui/$(id -u)/com.kilostop.whatsapp-bridge` | `sudo launchctl kickstart -k system/com.kilostop.whatsapp-bridge` |
+
+After `go build` in the repo, `cp` the binary to the machine's runtime path before restarting launchd.
 
 ### Python MCP Server
 ```bash

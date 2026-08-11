@@ -249,6 +249,8 @@ The system has two components that share a data folder:
 
 1. **Go WhatsApp Bridge** (`whatsapp-bridge/`): Connects to WhatsApp Web, receives messages in real-time, stores them in SQLite, and exposes an HTTP API on port 8080. Runs continuously in the background.
 
+   > 🔒 The REST API has **no authentication**: anyone who can reach the port can send messages as your account and download your media. Since Aug 2026 the bridge therefore binds to `127.0.0.1` by default (before that it listened on **all** interfaces - on a machine in a VPN/LAN the whole account was one unauthenticated HTTP call away). A `-bind` flag exists, but only widen it if you put authentication in front.
+
 2. **Python MCP Server** (`whatsapp-mcp-server/`): Implements the MCP protocol. Launched on-demand by your AI client. Reads messages from the shared SQLite database and sends messages through the Go bridge's HTTP API.
 
 ## Usage

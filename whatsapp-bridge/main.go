@@ -52,6 +52,11 @@ type Message struct {
 // Package-level variable for storage path
 var globalAbsStoragePath string
 
+// Interface the REST API listens on. Loopback by default - the API is unauthenticated,
+// so exposing it beyond this machine hands the WhatsApp account to anyone who can reach
+// the port. Changed via the -bind flag.
+var bindHost = "127.0.0.1"
+
 // Database handler for storing message history
 type MessageStore struct {
 	db *sql.DB
@@ -2640,7 +2645,12 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
-	serverAddr := fmt.Sprintf(":%d", port)
+	// Bind to loopback only. The REST API has NO authentication: any caller that can
+	// reach this port can send messages as the linked account and download media. With
+	// ":%d" the listener answered on every interface, so on an always-on machine in a
+	// VPN/LAN the whole WhatsApp account was one unauthenticated HTTP call away.
+	// Override with -bind only if you add authentication in front of it.
+	serverAddr := fmt.Sprintf("%s:%d", bindHost, port)
 	listener, err := net.Listen("tcp", serverAddr)
 	if err != nil {
 		fmt.Printf("ERROR: Cannot start REST API on port %d (is another instance running?): %v\n", port, err)
@@ -2662,7 +2672,9 @@ func main() {
 
 	// Define command-line flag for storage path
 	storagePath := flag.String("storage-path", "store", "Absolute path to the directory where attachments and database should be stored.")
+	bindFlag := flag.String("bind", bindHost, "Interface for the REST API. Keep it on loopback: the API is unauthenticated.")
 	flag.Parse()
+	bindHost = *bindFlag
 
 	// Normalize the storage path
 	if filepath.IsAbs(*storagePath) {
