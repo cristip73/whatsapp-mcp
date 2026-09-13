@@ -307,6 +307,45 @@ By default, only media metadata is stored in the local database. The message wil
 - If you encounter permission issues when running uv, you may need to add it to your PATH or use the full path to the executable.
 - Make sure both the Go application and the Python server are running for the integration to work properly.
 
+### Client outdated (405) - recurring maintenance
+
+**Symptom:** the bridge process is alive and `/api/status` answers, but reports `{"connected":false,"logged_in":true}`. The log shows:
+
+```
+[Client/Socket ERROR] Error reading from websocket: failed to get reader: failed to read frame header: EOF
+[Client ERROR] Client outdated (405) connect failure (client version: 2.3000.xxxxxxxxx)
+```
+
+WhatsApp periodically retires old client versions and refuses the handshake. This is expected maintenance, not a broken install: **your session is intact** (`logged_in:true`), so no QR re-scan is needed. You only need a newer `whatsmeow`.
+
+**Fix:**
+
+```bash
+cd whatsapp-bridge
+go get go.mau.fi/whatsmeow@latest
+go build -o whatsapp-bridge main.go
+```
+
+If the build fails, it is because `whatsmeow` changed an API since your last update. Read the compiler error, adapt the call, rebuild. These are usually one-line signature changes (example from 2026-09-13: `SetStatusMessage` went from taking a `string` to taking a `types.SetStatusInput`).
+
+Then reinstall and restart. On macOS with launchd, remember the TCC gotcha above - copy the fresh binary out of the repo first:
+
+```bash
+cp whatsapp-bridge ~/CLAUDE/whatsapp-bridge/whatsapp-bridge
+launchctl bootout gui/$(id -u)/com.kilostop.whatsapp-bridge
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.kilostop.whatsapp-bridge.plist
+```
+
+Verify with `curl -s localhost:8080/api/status` - it should now say `"connected":true`, and the log should start backfilling the messages you missed while the bridge was down.
+
+**Before you start**, back up the session DB, so a bad update cannot cost you a re-link:
+
+```bash
+cp ~/CLAUDE/whatsapp-media/whatsapp.db ~/CLAUDE/whatsapp-media/whatsapp.db.bak
+```
+
+Expect to do this every few months. A bridge that has been silent for days is far more likely to be an outdated client than a lost session - check `/api/status` before you touch anything.
+
 ### Authentication Issues
 
 - **QR Code Not Displaying**: If the QR code doesn't appear, try restarting the authentication script. If issues persist, check if your terminal supports displaying QR codes.

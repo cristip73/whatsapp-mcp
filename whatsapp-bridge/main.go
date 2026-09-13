@@ -1091,7 +1091,7 @@ func setStatusMessage(client *whatsmeow.Client, message string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "not connected to WhatsApp"
 	}
-	err := client.SetStatusMessage(context.Background(), message)
+	err := client.SetStatusMessage(context.Background(), types.SetStatusInput{Text: &message})
 	if err != nil {
 		return false, fmt.Sprintf("failed to set status message: %v", err)
 	}
