@@ -38,6 +38,9 @@ go build -o whatsapp-bridge main.go          # Build
 | launchd | LaunchAgent `~/Library/LaunchAgents/com.kilostop.whatsapp-bridge.plist` (`gui/$(id -u)`) | **system LaunchDaemon** `/Library/LaunchDaemons/com.kilostop.whatsapp-bridge.plist`, `UserName ks1` - the mini has no GUI login, LaunchAgents never load there |
 | WhatsApp device | `:61` | `:63` (separate linked device, own QR) |
 | Restart | `launchctl kickstart -k gui/$(id -u)/com.kilostop.whatsapp-bridge` | `sudo launchctl kickstart -k system/com.kilostop.whatsapp-bridge` |
+| REST auth | none (single-user machine) | `-token-file ~/.config/whatsapp-bridge/token` (since 2026-09-23); MCP gets `WHATSAPP_API_TOKEN_FILE` in `.mcp.json` |
+
+**Colleague accounts on the mini** (since 2026-09-23): one bridge per macOS account, LaunchDaemon `com.kilostop.whatsapp-bridge.<Account>` running as that user, port `8080 + UID - 500`, always with `-token-file` (loopback is shared by all accounts, so an unauthenticated API lets any local user send as that account). Shared read-only install: `/usr/local/bin/whatsapp-bridge`, `/usr/local/share/whatsapp-mcp/`. Installer + details: MG_CP `WORKBENCH/20260923 WHATSAPP AGENT ELENA/install-whatsapp-coleg.sh`. Linking without QR: `connection(action="pair", phone=...)` returns an 8-character code typed on the phone.
 
 After `go build` in the repo, `cp` the binary to the machine's runtime path before restarting launchd.
 
