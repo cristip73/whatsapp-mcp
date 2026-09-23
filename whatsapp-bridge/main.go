@@ -39,6 +39,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // Message represents a chat message for our client
@@ -1374,8 +1375,10 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Extract media info
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message, msg.Info.ID)
 
-	// Skip if there's no content and no media
+	// Skip if there's no content and no media. Log only the field names (never content):
+	// voice notes stopped arriving on 2026-09-11 and were dropped here without a trace.
 	if content == "" && mediaType == "" {
+		logger.Infof("Skipped message %s in %s (from_me=%v): no text/media, fields=%v", msg.Info.ID, chatJID, msg.Info.IsFromMe, populatedFields(msg.Message))
 		return
 	}
 
@@ -2868,6 +2871,11 @@ func main() {
 			// Process history sync events
 			handleHistorySync(client, messageStore, v, logger)
 
+		case *events.UndecryptableMessage:
+			// Otherwise invisible: the message never reaches handleMessage.
+			logger.Warnf("Undecryptable message %s in %s (from_me=%v, unavailable=%v, type=%q, fail_mode=%q)",
+				v.Info.ID, v.Info.Chat.String(), v.Info.IsFromMe, v.IsUnavailable, v.UnavailableType, v.DecryptFailMode)
+
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")
 
@@ -3059,6 +3067,20 @@ func waitForPairing(client *whatsmeow.Client, logger waLog.Logger) bool {
 			req.resp <- pairResponse{code: code}
 		}
 	}
+}
+
+// populatedFields lists the top-level fields set on a message (names only, no values),
+// for diagnosing message types the bridge does not handle yet.
+func populatedFields(m *waProto.Message) []string {
+	if m == nil {
+		return nil
+	}
+	var names []string
+	m.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
+		names = append(names, string(fd.Name()))
+		return true
+	})
+	return names
 }
 
 func lastDigits(s string, n int) string {
