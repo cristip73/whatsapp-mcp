@@ -15,6 +15,23 @@ import unicodedata
 # MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
 
+# All calls to the Go bridge go through this session, so the bearer token (when the
+# bridge runs with -token-file) is attached in one place.
+_http = requests.Session()
+
+
+def configure_api(base_url: Optional[str] = None, token_file: Optional[str] = None) -> None:
+    """Point the client at a bridge (URL like http://127.0.0.1:8081/api) and load its token."""
+    global WHATSAPP_API_BASE_URL
+    if base_url:
+        WHATSAPP_API_BASE_URL = base_url.rstrip("/")
+    if token_file:
+        with open(os.path.expanduser(token_file)) as f:
+            token = f.read().strip()
+        if not token:
+            raise ValueError(f"Token file {token_file} is empty")
+        _http.headers["Authorization"] = f"Bearer {token}"
+
 # WhatsApp Desktop native database (macOS) — fallback for recent messages
 CHATSTORAGE_DB_PATH = os.path.expanduser(
     "~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite"
@@ -870,7 +887,7 @@ def get_contact_groups(jid: str) -> List[Dict[str, Any]]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/get_contact_groups"
         payload = {"jid": jid}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
 
         if response.status_code == 200:
             result = response.json()
@@ -897,7 +914,7 @@ def get_group_info(jid: str, include_participants: bool = False, participant_lim
     try:
         url = f"{WHATSAPP_API_BASE_URL}/get_group_info"
         payload = {"jid": jid}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             if result.get("success") and "group" in result:
@@ -920,7 +937,7 @@ def get_group_invite_link(jid: str, reset: bool = False) -> Tuple[bool, str, str
     try:
         url = f"{WHATSAPP_API_BASE_URL}/get_group_invite_link"
         payload = {"jid": jid, "reset": reset}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", ""), result.get("link", "")
@@ -935,7 +952,7 @@ def set_group_topic(jid: str, topic: str) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/set_group_topic"
         payload = {"jid": jid, "topic": topic}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -950,7 +967,7 @@ def set_group_announce(jid: str, announce: bool) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/set_group_announce"
         payload = {"jid": jid, "announce": announce}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -965,7 +982,7 @@ def set_group_locked(jid: str, locked: bool) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/set_group_locked"
         payload = {"jid": jid, "locked": locked}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -980,7 +997,7 @@ def set_group_join_approval(jid: str, mode: bool) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/set_group_join_approval"
         payload = {"jid": jid, "mode": mode}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -995,7 +1012,7 @@ def is_on_whatsapp(phones: List[str]) -> Dict[str, Any]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/is_on_whatsapp"
         payload = {"phones": phones}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             return response.json()
         else:
@@ -1011,7 +1028,7 @@ def send_reaction(chat_jid: str, sender_jid: str, message_id: str, reaction: str
     try:
         url = f"{WHATSAPP_API_BASE_URL}/send_reaction"
         payload = {"chat_jid": chat_jid, "sender_jid": sender_jid, "message_id": message_id, "reaction": reaction}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1026,7 +1043,7 @@ def edit_message(chat_jid: str, message_id: str, new_text: str) -> Tuple[bool, s
     try:
         url = f"{WHATSAPP_API_BASE_URL}/edit_message"
         payload = {"chat_jid": chat_jid, "message_id": message_id, "new_text": new_text}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1041,7 +1058,7 @@ def delete_message(chat_jid: str, sender_jid: str, message_id: str) -> Tuple[boo
     try:
         url = f"{WHATSAPP_API_BASE_URL}/delete_message"
         payload = {"chat_jid": chat_jid, "sender_jid": sender_jid, "message_id": message_id}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1056,7 +1073,7 @@ def mark_read(chat_jid: str, sender_jid: str, message_ids: List[str]) -> Tuple[b
     try:
         url = f"{WHATSAPP_API_BASE_URL}/mark_read"
         payload = {"chat_jid": chat_jid, "sender_jid": sender_jid, "message_ids": message_ids}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1071,7 +1088,7 @@ def create_poll(chat_jid: str, question: str, options: List[str], max_selections
     try:
         url = f"{WHATSAPP_API_BASE_URL}/create_poll"
         payload = {"chat_jid": chat_jid, "question": question, "options": options, "max_selections": max_selections}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1092,7 +1109,7 @@ def send_reply(chat_jid: str, quoted_message_id: str, quoted_sender_jid: str, me
             "message": message,
             "quoted_content": quoted_content,
         }
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1109,7 +1126,7 @@ def send_presence(presence: str) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/send_presence"
         payload = {"presence": presence}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1124,7 +1141,7 @@ def set_status_message(message: str) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/set_status_message"
         payload = {"message": message}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1139,7 +1156,7 @@ def create_newsletter(name: str, description: str = "") -> Dict[str, Any]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/create_newsletter"
         payload = {"name": name, "description": description}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             return response.json()
         else:
@@ -1152,7 +1169,7 @@ def get_newsletters() -> Dict[str, Any]:
     """List subscribed newsletters/channels."""
     try:
         url = f"{WHATSAPP_API_BASE_URL}/get_newsletters"
-        response = requests.post(url, json={})
+        response = _http.post(url, json={})
         if response.status_code == 200:
             return response.json()
         else:
@@ -1166,7 +1183,7 @@ def newsletter_send(jid: str, message: str) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/newsletter_send"
         payload = {"jid": jid, "message": message}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1181,7 +1198,7 @@ def send_status(message: str) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/send_status"
         payload = {"message": message}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1198,7 +1215,7 @@ def link_group(parent_jid: str, child_jid: str) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/link_group"
         payload = {"parent_jid": parent_jid, "child_jid": child_jid}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1213,7 +1230,7 @@ def unlink_group(parent_jid: str, child_jid: str) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/unlink_group"
         payload = {"parent_jid": parent_jid, "child_jid": child_jid}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1228,7 +1245,7 @@ def get_sub_groups(jid: str) -> Dict[str, Any]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/get_sub_groups"
         payload = {"jid": jid}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             return response.json()
         else:
@@ -1601,7 +1618,7 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
 
 def connection_status() -> Dict[str, Any]:
     try:
-        response = requests.get(f"{WHATSAPP_API_BASE_URL}/status", timeout=5)
+        response = _http.get(f"{WHATSAPP_API_BASE_URL}/status", timeout=5)
         if response.status_code == 200:
             return response.json()
         return {"connected": False, "logged_in": False, "error": f"HTTP {response.status_code}"}
@@ -1611,10 +1628,21 @@ def connection_status() -> Dict[str, Any]:
 
 def reconnect() -> Dict[str, Any]:
     try:
-        response = requests.post(f"{WHATSAPP_API_BASE_URL}/reconnect", timeout=15)
+        response = _http.post(f"{WHATSAPP_API_BASE_URL}/reconnect", timeout=15)
         return response.json()
     except requests.RequestException as e:
         return {"success": False, "message": f"Bridge unreachable: {e}"}
+
+
+def pair(phone: str) -> Dict[str, Any]:
+    """Ask the bridge for a pairing code (link by phone number instead of QR)."""
+    try:
+        response = _http.post(f"{WHATSAPP_API_BASE_URL}/pair", json={"phone": phone}, timeout=60)
+        return response.json()
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Bridge unreachable: {e}"}
+    except ValueError:
+        return {"success": False, "message": f"Unexpected bridge response (HTTP {response.status_code})"}
 
 
 def send_message(recipient: str, message: str) -> Tuple[bool, str]:
@@ -1629,7 +1657,7 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
             "message": message,
         }
         
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -1663,7 +1691,7 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
             "media_path": media_path
         }
         
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -1703,7 +1731,7 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
             "media_path": media_path
         }
         
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         
         # Check if the request was successful
         if response.status_code == 200:
@@ -1736,7 +1764,7 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
             "chat_jid": chat_jid
         }
         
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         
         if response.status_code == 200:
             result = response.json()
@@ -1767,7 +1795,7 @@ def create_group(name: str, participants: List[str]) -> Tuple[bool, str, Optiona
     try:
         url = f"{WHATSAPP_API_BASE_URL}/create_group"
         payload = {"name": name, "participants": participants}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", ""), result.get("jid")
@@ -1784,7 +1812,7 @@ def join_group_with_link(invite: str) -> Tuple[bool, str, Optional[str]]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/join_group"
         payload = {"invite": invite}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", ""), result.get("jid")
@@ -1801,7 +1829,7 @@ def leave_group(jid: str) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/leave_group"
         payload = {"jid": jid}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1818,7 +1846,7 @@ def update_group_participants(jid: str, action: str, participants: List[str]) ->
     try:
         url = f"{WHATSAPP_API_BASE_URL}/update_group_participants"
         payload = {"jid": jid, "action": action, "participants": participants}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1835,7 +1863,7 @@ def set_group_name(jid: str, name: str) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/set_group_name"
         payload = {"jid": jid, "name": name}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")
@@ -1852,7 +1880,7 @@ def set_group_photo(jid: str, image_path: str) -> Tuple[bool, str]:
     try:
         url = f"{WHATSAPP_API_BASE_URL}/set_group_photo"
         payload = {"jid": jid, "image_path": image_path}
-        response = requests.post(url, json=payload)
+        response = _http.post(url, json=payload)
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "")

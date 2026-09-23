@@ -1,10 +1,12 @@
 import argparse
+import os
 from typing import List, Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP
 import whatsapp
 from whatsapp import (
     connection_status as whatsapp_connection_status,
     reconnect as whatsapp_reconnect,
+    pair as whatsapp_pair,
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
     list_chats as whatsapp_list_chats,
@@ -483,14 +485,23 @@ def _search_registry(query: str, limit: int = 5) -> List[Dict[str, Any]]:
 
 
 @mcp.tool()
-def connection(action: str = "status") -> Dict[str, Any]:
-    """Check WhatsApp connection status or reconnect.
+def connection(action: str = "status", phone: Optional[str] = None) -> Dict[str, Any]:
+    """Check WhatsApp connection status, reconnect, or link this agent to a WhatsApp account.
 
     Args:
-        action: "status" (default) to check, or "reconnect" to reconnect a dropped session
+        action: "status" (default) to check, "reconnect" to reconnect a dropped session,
+            or "pair" to get a pairing code when status shows logged_in = false
+        phone: for action="pair" only - the account's number in international format,
+            digits only (e.g. 40722123456). The returned 8-character code is typed on that
+            phone within ~2 minutes: WhatsApp > Settings > Linked devices > Link a device >
+            "Link with phone number instead".
     """
     if action == "reconnect":
         return whatsapp_reconnect()
+    if action == "pair":
+        if not phone:
+            return {"success": False, "message": "phone is required for action='pair' (international format, digits only)"}
+        return whatsapp_pair(phone)
     return whatsapp_connection_status()
 
 
@@ -657,7 +668,20 @@ if __name__ == "__main__":
         required=True,
         help='Absolute path for storing attachments and the message database.'
     )
+    parser.add_argument(
+        '--api-url',
+        type=str,
+        default=os.environ.get('WHATSAPP_API_URL'),
+        help='Base URL of the Go bridge API (default http://localhost:8080/api).'
+    )
+    parser.add_argument(
+        '--token-file',
+        type=str,
+        default=os.environ.get('WHATSAPP_API_TOKEN_FILE'),
+        help='File with the bearer token, when the bridge runs with -token-file.'
+    )
     args = parser.parse_args()
 
     whatsapp.initialize_attachments_path(args.attachments_path)
+    whatsapp.configure_api(args.api_url, args.token_file)
     mcp.run(transport='stdio')

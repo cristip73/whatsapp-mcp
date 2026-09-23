@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	cryptoRand "crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -56,6 +58,30 @@ var globalAbsStoragePath string
 // so exposing it beyond this machine hands the WhatsApp account to anyone who can reach
 // the port. Changed via the -bind flag.
 var bindHost = "127.0.0.1"
+
+// Shared secret for the REST API, loaded from -token-file. Empty = no authentication
+// (the historical behaviour). On a machine with several macOS accounts loopback is
+// shared by all of them, so without a token every local user can send messages as
+// the linked account. With a token, every /api/ call needs "Authorization: Bearer <token>".
+var apiToken string
+
+// Pairing by phone number (instead of scanning a QR code). The REST handler hands the
+// request to the pairing loop in main, which owns the websocket, and waits for the code.
+type pairRequest struct {
+	phone string
+	resp  chan pairResponse
+}
+
+type pairResponse struct {
+	code string
+	err  error
+}
+
+var pairRequests = make(chan pairRequest)
+
+// Set once the device is linked; /api/pair refuses after that.
+var pairedMu sync.Mutex
+var paired bool
 
 // Database handler for storing message history
 type MessageStore struct {
@@ -1473,10 +1499,10 @@ type GetGroupInfoRequest struct {
 }
 
 type ParticipantInfo struct {
-	JID        string `json:"jid"`
-	Phone      string `json:"phone"`
-	Name       string `json:"name"`
-	IsAdmin    bool   `json:"is_admin"`
+	JID     string `json:"jid"`
+	Phone   string `json:"phone"`
+	Name    string `json:"name"`
+	IsAdmin bool   `json:"is_admin"`
 }
 
 type GroupInfoData struct {
@@ -1489,8 +1515,8 @@ type GroupInfoData struct {
 }
 
 type GetGroupInfoResponse struct {
-	Success bool          `json:"success"`
-	Message string        `json:"message"`
+	Success bool           `json:"success"`
+	Message string         `json:"message"`
 	Group   *GroupInfoData `json:"group,omitempty"`
 }
 
@@ -1848,7 +1874,89 @@ func extractDirectPathFromURL(url string) string {
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
+// requireToken wraps the API mux: when a token is configured, requests without the
+// matching bearer token get 401. Constant-time compare so the token can't be probed.
+func requireToken(next http.Handler) http.Handler {
+	if apiToken == "" {
+		return next
+	}
+	expected := []byte("Bearer " + apiToken)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := []byte(r.Header.Get("Authorization"))
+		if subtle.ConstantTimeCompare(got, expected) != 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"message": "unauthorized: missing or wrong bearer token",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func loadTokenFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	token := strings.TrimSpace(string(data))
+	if len(token) < 16 {
+		return "", fmt.Errorf("token in %s is shorter than 16 characters", path)
+	}
+	return token, nil
+}
+
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+	// Handler for pairing by phone number: POST {"phone": "40722123456"} -> {"code": "ABCD-EFGH"}.
+	// The code is typed on the phone: WhatsApp > Linked devices > Link a device >
+	// "Link with phone number instead". Valid for the ~160s the login websocket stays open.
+	http.HandleFunc("/api/pair", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "use POST"})
+			return
+		}
+		pairedMu.Lock()
+		alreadyPaired := paired || client.Store.ID != nil
+		pairedMu.Unlock()
+		if alreadyPaired {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "already linked; nothing to pair"})
+			return
+		}
+		var req struct {
+			Phone string `json:"phone"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Phone) == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "body must be {\"phone\": \"<international number, digits only>\"}"})
+			return
+		}
+		pr := pairRequest{phone: req.Phone, resp: make(chan pairResponse, 1)}
+		select {
+		case pairRequests <- pr:
+		case <-time.After(20 * time.Second):
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "pairing loop busy, try again"})
+			return
+		}
+		res := <-pr.resp
+		if res.err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": res.err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":        true,
+			"code":           res.code,
+			"expires_in_sec": 150,
+			"instructions":   "On the phone: WhatsApp > Settings > Linked devices > Link a device > Link with phone number instead, then type the code.",
+		})
+	})
+
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
@@ -2659,7 +2767,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	go func() {
-		if err := http.Serve(listener, nil); err != nil {
+		if err := http.Serve(listener, requireToken(http.DefaultServeMux)); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
@@ -2672,9 +2780,22 @@ func main() {
 
 	// Define command-line flag for storage path
 	storagePath := flag.String("storage-path", "store", "Absolute path to the directory where attachments and database should be stored.")
-	bindFlag := flag.String("bind", bindHost, "Interface for the REST API. Keep it on loopback: the API is unauthenticated.")
+	bindFlag := flag.String("bind", bindHost, "Interface for the REST API. Keep it on loopback.")
+	portFlag := flag.Int("port", 8080, "Port for the REST API. Use a different port per account when several bridges share a machine.")
+	tokenFileFlag := flag.String("token-file", "", "File holding the REST API bearer token. Empty = no authentication. Required when other users share the machine.")
 	flag.Parse()
 	bindHost = *bindFlag
+	if *tokenFileFlag != "" {
+		t, err := loadTokenFile(*tokenFileFlag)
+		if err != nil {
+			logger.Errorf("Cannot load API token: %v", err)
+			os.Exit(1)
+		}
+		apiToken = t
+		logger.Infof("REST API requires a bearer token (from %s)", *tokenFileFlag)
+	} else {
+		logger.Warnf("REST API has NO authentication: any local user can use this WhatsApp account. Set -token-file on shared machines.")
+	}
 
 	// Normalize the storage path
 	if filepath.IsAbs(*storagePath) {
@@ -2755,38 +2876,17 @@ func main() {
 		}
 	})
 
-	// Create channel to track connection success
-	connected := make(chan bool, 1)
-
 	// Connect to WhatsApp
+	restStarted := false
 	if client.Store.ID == nil {
-		// No ID stored, this is a new client, need to pair with phone
-		qrChan, _ := client.GetQRChannel(context.Background())
-		err = client.Connect()
-		if err != nil {
-			logger.Errorf("Failed to connect: %v", err)
+		// Not linked yet. Start the REST API first, so the device can be linked either by
+		// scanning the QR printed below (terminal / log) or by a pairing code from /api/pair.
+		startRESTServer(client, messageStore, *portFlag)
+		restStarted = true
+		if !waitForPairing(client, logger) {
 			return
 		}
-
-		// Print QR code for pairing with phone
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				fmt.Println("\nScan this QR code with your WhatsApp app:")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-			} else if evt.Event == "success" {
-				connected <- true
-				break
-			}
-		}
-
-		// Wait for connection
-		select {
-		case <-connected:
-			fmt.Println("\nSuccessfully connected and authenticated!")
-		case <-time.After(3 * time.Minute):
-			logger.Errorf("Timeout waiting for QR code scan")
-			return
-		}
+		fmt.Println("\nSuccessfully connected and authenticated!")
 	} else {
 		// Already logged in, just connect
 		err = client.Connect()
@@ -2794,7 +2894,6 @@ func main() {
 			logger.Errorf("Failed to connect: %v", err)
 			return
 		}
-		connected <- true
 	}
 
 	// Wait a moment for connection to stabilize
@@ -2812,8 +2911,10 @@ func main() {
 	// Backfill LID->PN mappings in background (don't block REST server)
 	go backfillLIDMappings(client, messageStore, logger)
 
-	// Start REST API server
-	startRESTServer(client, messageStore, 8080)
+	// Start REST API server (already running if we just went through pairing)
+	if !restStarted {
+		startRESTServer(client, messageStore, *portFlag)
+	}
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)
@@ -2867,6 +2968,104 @@ func backfillLIDMappings(client *whatsmeow.Client, store *MessageStore, logger w
 		}
 	}
 	fmt.Printf("Backfill: seeded %d/%d LID->PN mappings from whatsmeow store\n", count, len(lids))
+}
+
+// waitForPairing keeps a login websocket open until the device is linked. Each
+// websocket lives ~160s (the QR codes run out), so it reopens them in a loop instead of
+// giving up: the bridge runs unattended under launchd and the person may link it hours later.
+// A pairing request from /api/pair reopens the websocket first, so the code gets the full window.
+func waitForPairing(client *whatsmeow.Client, logger waLog.Logger) bool {
+	qrFile := filepath.Join(globalAbsStoragePath, "pairing-qr.txt")
+	defer os.Remove(qrFile)
+
+	open := func() (<-chan whatsmeow.QRChannelItem, error) {
+		qrChan, err := client.GetQRChannel(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		if err := client.Connect(); err != nil {
+			return nil, err
+		}
+		return qrChan, nil
+	}
+
+	var qrChan <-chan whatsmeow.QRChannelItem
+	for {
+		if qrChan == nil {
+			c, err := open()
+			if err != nil {
+				logger.Errorf("Failed to open login websocket: %v (retrying in 15s)", err)
+				time.Sleep(15 * time.Second)
+				continue
+			}
+			qrChan = c
+		}
+
+		select {
+		case evt, ok := <-qrChan:
+			if !ok {
+				qrChan = nil
+				continue
+			}
+			switch evt.Event {
+			case whatsmeow.QRChannelEventCode:
+				fmt.Println("\nScan this QR code with your WhatsApp app (or request a pairing code via POST /api/pair):")
+				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+				var buf bytes.Buffer
+				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, &buf)
+				_ = os.WriteFile(qrFile, buf.Bytes(), 0600)
+			case "success":
+				pairedMu.Lock()
+				paired = true
+				pairedMu.Unlock()
+				return true
+			default:
+				logger.Infof("Login window closed (%s); opening a new one", evt.Event)
+				client.Disconnect()
+				qrChan = nil
+			}
+
+		case req := <-pairRequests:
+			// Fresh websocket, so the code gets the whole ~160s window.
+			client.Disconnect()
+			c, err := open()
+			if err != nil {
+				req.resp <- pairResponse{err: fmt.Errorf("cannot open login websocket: %v", err)}
+				qrChan = nil
+				continue
+			}
+			qrChan = c
+			// Wait for the first QR event: it means the websocket is ready for pairing.
+			select {
+			case evt, ok := <-qrChan:
+				if !ok || evt.Event != whatsmeow.QRChannelEventCode {
+					req.resp <- pairResponse{err: fmt.Errorf("login websocket not ready (%v)", evt.Event)}
+					client.Disconnect()
+					qrChan = nil
+					continue
+				}
+			case <-time.After(20 * time.Second):
+				req.resp <- pairResponse{err: fmt.Errorf("login websocket not ready after 20s")}
+				client.Disconnect()
+				qrChan = nil
+				continue
+			}
+			code, err := client.PairPhone(context.Background(), req.phone, true, whatsmeow.PairClientChrome, "Chrome (macOS)")
+			if err != nil {
+				req.resp <- pairResponse{err: fmt.Errorf("pairing code request failed: %v", err)}
+				continue
+			}
+			logger.Infof("Pairing code issued for a phone ending in %s", lastDigits(req.phone, 3))
+			req.resp <- pairResponse{code: code}
+		}
+	}
+}
+
+func lastDigits(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
 }
 
 // isRealName reports whether s looks like a human-readable name rather than a
