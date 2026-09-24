@@ -1867,13 +1867,10 @@ func extractDirectPathFromURL(url string) string {
 		return url // Return original URL if parsing fails
 	}
 
-	pathPart := parts[1]
-
-	// Remove query parameters
-	pathPart = strings.SplitN(pathPart, "?", 2)[0]
-
-	// Create proper direct path format
-	return "/" + pathPart
+	// Keep the query string: it carries the oh/oe signature. whatsmeow (since 2026-09)
+	// downloads only by DirectPath and appends "&hash=...", so a path without the query
+	// is unsigned and the CDN answers 403 for every media type.
+	return "/" + parts[1]
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
