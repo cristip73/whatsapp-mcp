@@ -488,6 +488,15 @@ def _search_registry(query: str, limit: int = 5) -> List[Dict[str, Any]]:
 def connection(action: str = "status", phone: Optional[str] = None) -> Dict[str, Any]:
     """Check WhatsApp connection status, reconnect, or link this agent to a WhatsApp account.
 
+    Call status first whenever another WhatsApp tool fails or returns nothing unexpected.
+    Recovery:
+    - connected=false, logged_in=true: the link exists but the connection dropped -> "reconnect".
+    - logged_in=false: WhatsApp unlinked this device (removed from the phone, phone offline
+      for many days, or session expired). The old link is gone; nothing to reconnect. Tell the
+      user plainly, ask for their number, and run "pair" for a fresh 8-character code.
+    - "pair" answers "restarting" or the bridge is unreachable: it restarts itself after a
+      logout; wait about a minute and try again.
+
     Args:
         action: "status" (default) to check, "reconnect" to reconnect a dropped session,
             or "pair" to get a pairing code when status shows logged_in = false

@@ -84,6 +84,9 @@ var pairRequests = make(chan pairRequest)
 var pairedMu sync.Mutex
 var paired bool
 
+// True while waitForPairing is running, i.e. while /api/pair has someone to talk to.
+var pairingActive bool
+
 // Database handler for storing message history
 type MessageStore struct {
 	db *sql.DB
@@ -1920,11 +1923,17 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			return
 		}
 		pairedMu.Lock()
-		alreadyPaired := paired || client.Store.ID != nil
+		alreadyPaired := client.Store.ID != nil
+		active := pairingActive
 		pairedMu.Unlock()
 		if alreadyPaired {
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "already linked; nothing to pair"})
+			return
+		}
+		if !active {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "bridge is restarting after a logout; try again in about a minute"})
 			return
 		}
 		var req struct {
@@ -2877,7 +2886,14 @@ func main() {
 			logger.Infof("Connected to WhatsApp")
 
 		case *events.LoggedOut:
-			logger.Warnf("Device logged out, please scan QR code to log in again")
+			// whatsmeow has already deleted the session. Exit so launchd (KeepAlive) restarts
+			// the bridge unpaired: the pairing loop then runs and /api/pair works again,
+			// without anyone needing sudo to restart the daemon.
+			logger.Warnf("Device logged out (%v); exiting so the bridge restarts ready to pair again", v.Reason)
+			go func() {
+				time.Sleep(2 * time.Second)
+				os.Exit(1)
+			}()
 		}
 	})
 
@@ -2982,6 +2998,14 @@ func backfillLIDMappings(client *whatsmeow.Client, store *MessageStore, logger w
 func waitForPairing(client *whatsmeow.Client, logger waLog.Logger) bool {
 	qrFile := filepath.Join(globalAbsStoragePath, "pairing-qr.txt")
 	defer os.Remove(qrFile)
+	pairedMu.Lock()
+	pairingActive = true
+	pairedMu.Unlock()
+	defer func() {
+		pairedMu.Lock()
+		pairingActive = false
+		pairedMu.Unlock()
+	}()
 
 	open := func() (<-chan whatsmeow.QRChannelItem, error) {
 		qrChan, err := client.GetQRChannel(context.Background())
