@@ -273,8 +273,84 @@ func extractTextContent(msg *waProto.Message) string {
 		return extendedText.GetText()
 	}
 
-	// For now, we're ignoring non-text messages
+	// Business messages (WhatsApp Cloud API templates, interactive messages and the
+	// replies to their buttons) keep their text in dedicated fields. Without this they
+	// were dropped as "no text/media" (9 Oct 2026: templates from Kilostop's Cloud API
+	// numbers never reached messages.db).
+	if tmpl := msg.GetTemplateMessage(); tmpl != nil {
+		if h := tmpl.GetHydratedTemplate(); h != nil {
+			return hydratedTemplateText(h)
+		}
+		if h := tmpl.GetHydratedFourRowTemplate(); h != nil {
+			return hydratedTemplateText(h)
+		}
+		return interactiveText(tmpl.GetInteractiveMessageTemplate())
+	}
+	if im := msg.GetInteractiveMessage(); im != nil {
+		return interactiveText(im)
+	}
+	if b := msg.GetButtonsMessage(); b != nil {
+		return joinNonEmpty(b.GetText(), b.GetContentText(), b.GetFooterText())
+	}
+	if l := msg.GetListMessage(); l != nil {
+		return joinNonEmpty(l.GetTitle(), l.GetDescription())
+	}
+	if r := msg.GetTemplateButtonReplyMessage(); r != nil {
+		return r.GetSelectedDisplayText()
+	}
+	if r := msg.GetButtonsResponseMessage(); r != nil {
+		return r.GetSelectedDisplayText()
+	}
+	if r := msg.GetListResponseMessage(); r != nil {
+		return r.GetTitle()
+	}
+	if r := msg.GetInteractiveResponseMessage(); r != nil {
+		return r.GetBody().GetText()
+	}
+
 	return ""
+}
+
+// hydratedTemplateText renders a template as title, body, footer and one
+// "[button]" line per button, skipping empty parts.
+func hydratedTemplateText(h *waProto.TemplateMessage_HydratedFourRowTemplate) string {
+	parts := []string{h.GetHydratedTitleText(), h.GetHydratedContentText(), h.GetHydratedFooterText()}
+	for _, btn := range h.GetHydratedButtons() {
+		label := ""
+		switch {
+		case btn.GetQuickReplyButton() != nil:
+			label = btn.GetQuickReplyButton().GetDisplayText()
+		case btn.GetUrlButton() != nil:
+			label = joinWith(" ", btn.GetUrlButton().GetDisplayText(), btn.GetUrlButton().GetURL())
+		case btn.GetCallButton() != nil:
+			label = btn.GetCallButton().GetDisplayText()
+		}
+		if label != "" {
+			parts = append(parts, "["+label+"]")
+		}
+	}
+	return joinNonEmpty(parts...)
+}
+
+func interactiveText(im *waProto.InteractiveMessage) string {
+	if im == nil {
+		return ""
+	}
+	return joinNonEmpty(im.GetHeader().GetTitle(), im.GetBody().GetText(), im.GetFooter().GetText())
+}
+
+func joinNonEmpty(parts ...string) string {
+	return joinWith("\n", parts...)
+}
+
+func joinWith(sep string, parts ...string) string {
+	var kept []string
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			kept = append(kept, p)
+		}
+	}
+	return strings.Join(kept, sep)
 }
 
 // SendMessageResponse represents the response for the send message API
@@ -3276,14 +3352,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				}
 
 				// Extract text content
-				var content string
-				if msg.Message.Message != nil {
-					if conv := msg.Message.Message.GetConversation(); conv != "" {
-						content = conv
-					} else if ext := msg.Message.Message.GetExtendedTextMessage(); ext != nil {
-						content = ext.GetText()
-					}
-				}
+				content := extractTextContent(msg.Message.Message)
 
 				// Extract media info
 				var mediaType, filename, url string
