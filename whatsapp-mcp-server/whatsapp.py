@@ -1628,6 +1628,8 @@ PAIR_PHONE_STEPS = (
 )
 
 PAIR_GUIDANCE = (
+    "If the user is at a screen (e.g. a laptop next to the phone), action='qr' is the recommended way to link; "
+    "codes are for when they have no screen at hand. "
     "Show this code to the user once, with the phone steps. "
     "If they mistyped it or need to see it again, show them this SAME code again (it is in this "
     "response); do not call pair for that. Call pair again only for a different number, or after "
@@ -1635,6 +1637,7 @@ PAIR_GUIDANCE = (
     "returns the same code (reused=true) only for about 2 minutes, after that it issues a NEW one. "
     "If the phone says \"Couldn't link device\", it is not the user's fault: do not promise more time "
     "and do not guess the cause (version, timing). "
+    "If the phone said \"Couldn't link device\" and connection status shows pairing.phone_reached_bridge = true (on older bridges: pairing.last_event \"notification received\"), the phone reached this bridge and was still refused: do not ask for a second code, use action='qr' instead. "
     "After 2 failed codes in a row, stop: ask the user to check that WhatsApp is up to date and that "
     "the phone does not already have 4 linked devices, and suggest a pause of a few hours before the "
     "next try (WhatsApp may block linking for a while after repeated attempts). If it still fails after the pause, tell them to "
@@ -1728,6 +1731,105 @@ def _shape_pair_response(raw: Any, phone: str) -> Dict[str, Any]:
         out["new_codes_last_hour"] = n
         if n >= _PAIR_WARN_AT:
             out["warning"] = PAIR_STOP_WARNING.format(n=n)
+        elif _phone_reached_bridge:
+            out["warning"] = QR_SWITCH_WARNING
+    return out
+
+
+# ── QR linking (action="qr") ──────────────────────────────────────────────────
+# Added after a code link failed at the very last step (phone reached the bridge,
+# companion_finish sent, phone said "Couldn't link device"); same symptom is reported
+# for code linking on unofficial clients where QR works (Baileys #2832).
+
+QR_PHONE_STEPS = (
+    "On the phone: WhatsApp > Settings > Linked devices > Link a device, then point the camera "
+    "at the QR code on the screen. Do NOT choose \"Link with phone number instead\"."
+)
+
+QR_GUIDANCE = (
+    "The QR must be on a DIFFERENT screen than the phone that scans it. Before you call qr, ask the "
+    "user where they are reading this conversation. If it is on the phone (or they have no T3 app on a "
+    "computer), tell them to open this conversation on a laptop or computer at https://app.t3.codes/ "
+    "and log in with their T3 password (never write a password yourself, just say \"your T3 password\"), "
+    "then scan the QR that appears there with the phone. Call qr only after they confirm they see the "
+    "conversation on the big screen. "
+    "Put the QR image in your reply as markdown with the absolute path: ![QR](<image_path>). "
+    "Never paste the QR as text: it contains linking keys and conversations are kept. If the user "
+    "cannot see the image, check they are in T3 (desktop app or https://app.t3.codes/) and call qr again. "
+    "Give them the phone steps (scan the QR; not the phone-number option). "
+    "The QR changes: the first one lasts about 60 s, the next ones about 20 s. If they did not "
+    "manage in time, call action='qr' again and show the new image: that is safe, unlike pairing "
+    "codes it breaks nothing and does not use up code attempts. "
+    "After they scan, call connection status until logged_in is true. "
+    "A QR replaces any pairing code that was active."
+)
+
+QR_OLD_BRIDGE_MESSAGE = (
+    "This bridge has no QR linking (it predates /api/qr). Use connection action='pair' with the "
+    "user's number instead, following the pair guidance."
+)
+
+QR_SWITCH_WARNING = (
+    "Earlier in this session the phone reached this bridge with a code and the link still failed. "
+    "Do not try another code: use connection action='qr' instead."
+)
+
+# Set when a status in this MCP process showed that the phone reached the bridge with a code.
+_phone_reached_bridge = False
+
+
+def _pairing_reached_bridge(pairing: Any) -> bool:
+    """Did the phone reach this bridge with a code? New bridges say so in
+    pairing.phone_reached_bridge; older ones (23 Oct morning) only in last_event."""
+    if not isinstance(pairing, dict):
+        return False
+    if "phone_reached_bridge" in pairing:
+        return bool(pairing.get("phone_reached_bridge"))
+    return "notification received" in str(pairing.get("last_event") or "")
+
+
+def _note_pairing_event(status: Dict[str, Any]) -> None:
+    global _phone_reached_bridge
+    if _pairing_reached_bridge(status.get("pairing")):
+        _phone_reached_bridge = True
+
+
+def qr() -> Dict[str, Any]:
+    """Ask the bridge for the current login QR (image file + text form)."""
+    try:
+        response = _http.post(f"{WHATSAPP_API_BASE_URL}/qr", timeout=60)
+        if response.status_code == 404:
+            return {"success": False, "qr_supported": False, "message": QR_OLD_BRIDGE_MESSAGE}
+        raw = response.json()
+    except ValueError:
+        return {"success": False, "message": f"Unexpected bridge response (HTTP {response.status_code})"}
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Bridge unreachable: {e}",
+                "next_step": "Wait about a minute, then run connection status once."}
+    if not isinstance(raw, dict):
+        return {"success": False, "message": f"Unexpected bridge response: {raw!r}"[:300]}
+    if not raw.get("success"):
+        out = {"success": False, "message": raw.get("message") or "QR failed (no message from bridge)"}
+        msg = str(out["message"]).lower()
+        if "already linked" in msg:
+            out["next_step"] = "Already linked: run connection status; nothing to link."
+        elif "restarting" in msg:
+            out["next_step"] = "Wait about a minute, then call qr once more."
+        else:
+            out["next_step"] = "Do not retry in a loop. Run connection status once and tell the user plainly what it says."
+        return out
+    out: Dict[str, Any] = {"success": True}
+    # text_qr and qr are left out on purpose: the QR string carries linking keys, and whatever a tool
+    # returns is stored in the conversation, which other accounts on the mini can read (D9).
+    for key in ("image_path", "expires_in_sec", "refs_left", "message"):
+        if raw.get(key) is not None:
+            out[key] = raw.get(key)
+    if not out.get("image_path"):
+        return {"success": False, "message": "The bridge could not write the QR image.",
+                "next_step": "Call qr once more; if there is still no image, use pair (code) instead."}
+    out["markdown"] = f"![QR]({out['image_path']})"
+    out["guidance"] = QR_GUIDANCE
+    out["phone_steps"] = QR_PHONE_STEPS
     return out
 
 
@@ -1735,13 +1837,27 @@ def _status_hint(status: Dict[str, Any]) -> Optional[str]:
     if status.get("logged_in"):
         return None
     pairing = status.get("pairing")
-    if isinstance(pairing, dict) and pairing.get("state") == "code_issued":
-        return (
-            "A pairing code is already active. If the user needs it again, show the code you already gave "
-            "them; do not call pair just to see it (after about 2 minutes pair issues a NEW code and "
-            "cancels the old one)."
-        )
-    return "Not linked. To link, ask the user's number and call pair once (see the pair guidance)."
+    if isinstance(pairing, dict):
+        if pairing.get("state") == "qr_shown":
+            return (
+                "A QR is on screen. Wait for the user to scan it and check status again; if it expired "
+                "(qr_expires_in_sec near 0) call qr again, that is safe."
+            )
+        if _pairing_reached_bridge(pairing):
+            return (
+                "The phone reached this bridge with the code. If the phone then said \"Couldn't link device\", "
+                "do not ask for another code: use action='qr'."
+            )
+        if pairing.get("state") == "code_issued":
+            return (
+                "A pairing code is already active. If the user needs it again, show the code you already gave "
+                "them; do not call pair just to see it (after about 2 minutes pair issues a NEW code and "
+                "cancels the old one)."
+            )
+    return (
+        "Not linked. To link: if the user is at a screen, use action='qr' (recommended); otherwise ask "
+        "their number and call pair once (see the pair guidance)."
+    )
 
 
 # Note: ValueError is caught BEFORE RequestException on purpose - requests' JSONDecodeError
@@ -1759,6 +1875,7 @@ def connection_status() -> Dict[str, Any]:
     if not isinstance(data, dict):
         return {"connected": False, "logged_in": False, "error": "Unexpected bridge response"}
     # The "pairing" object (new bridges, only while not linked) is passed through as is.
+    _note_pairing_event(data)
     hint = _status_hint(data)
     if hint:
         data["hint"] = hint
@@ -1785,7 +1902,7 @@ def reconnect() -> Dict[str, Any]:
             return {
                 "success": False,
                 "message": "This device is not linked to WhatsApp (logged_in=false), so there is nothing to "
-                "reconnect. Ask the user's number and use connection action='pair' once.",
+                "reconnect. Link again with connection action='qr' (user at a screen) or action='pair' once.",
             }
     return data
 

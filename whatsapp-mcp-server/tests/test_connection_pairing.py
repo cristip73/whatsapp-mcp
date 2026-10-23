@@ -57,6 +57,7 @@ class PairingTests(unittest.TestCase):
     def setUp(self):
         self.old_base = whatsapp.WHATSAPP_API_BASE_URL
         whatsapp._new_codes_by_phone.clear()
+        whatsapp._phone_reached_bridge = False
         self.bridge = FakeBridge().__enter__()
         whatsapp.WHATSAPP_API_BASE_URL = self.bridge.base
 
@@ -64,6 +65,7 @@ class PairingTests(unittest.TestCase):
         self.bridge.__exit__(None, None, None)
         whatsapp.WHATSAPP_API_BASE_URL = self.old_base
         whatsapp._new_codes_by_phone.clear()
+        whatsapp._phone_reached_bridge = False
 
     # --- pair, new bridge ---------------------------------------------------
 
@@ -176,6 +178,119 @@ class PairingTests(unittest.TestCase):
         self.bridge.responses["/api/status"] = (200, {"connected": True, "logged_in": True, "own_jid": "x"})
         self.assertNotIn("hint", whatsapp.connection_status())
 
+    # --- qr -------------------------------------------------------------------
+
+    def test_qr_new_bridge_passes_fields_and_guidance(self):
+        self.bridge.responses["/api/qr"] = (200, {
+            "success": True, "qr": "2@abc,def", "image_path": "/tmp/wa-qr/current.png",
+            "text_qr": "#### QR ####", "expires_in_sec": 58, "refs_left": 5, "message": "qr ready",
+        })
+        out = whatsapp.qr()
+        self.assertTrue(out["success"])
+        self.assertEqual(out["image_path"], "/tmp/wa-qr/current.png")
+        self.assertEqual(out["markdown"], "![QR](/tmp/wa-qr/current.png)")
+        self.assertEqual(out["expires_in_sec"], 58)
+        self.assertEqual(out["refs_left"], 5)
+        self.assertNotIn("text_qr", out)  # QR keys must not reach the conversation
+        self.assertNotIn("qr", out)  # raw ref string is not useful to the agent
+        self.assertIn("absolute path", out["guidance"])
+        self.assertIn("Never paste the QR as text", out["guidance"])
+        self.assertIn("call action='qr' again", out["guidance"])
+        self.assertIn("logged_in", out["guidance"])
+        self.assertIn("Do NOT choose", out["phone_steps"])
+        method, path, _ = self.bridge.requests[-1]
+        self.assertEqual((method, path), ("POST", "/api/qr"))
+
+    def test_qr_without_image_is_an_error_not_a_text_fallback(self):
+        self.bridge.responses["/api/qr"] = (200, {
+            "success": True, "image_path": "", "text_qr": "#### QR ####",
+            "expires_in_sec": 60, "refs_left": 6,
+        })
+        out = whatsapp.qr()
+        self.assertFalse(out["success"])
+        self.assertNotIn("text_qr", out)
+        self.assertIn("pair", out["next_step"])
+
+    def test_qr_guidance_requires_another_screen_via_t3_web(self):
+        self.bridge.responses["/api/qr"] = (200, {
+            "success": True, "image_path": "/tmp/wa-qr/current.png", "text_qr": "x",
+            "expires_in_sec": 60, "refs_left": 6,
+        })
+        guidance = whatsapp.qr()["guidance"]
+        self.assertIn("https://app.t3.codes/", guidance)
+        self.assertIn("DIFFERENT screen", guidance)
+        self.assertIn("your T3 password", guidance)
+        self.assertIn("after they confirm", guidance)
+
+    def test_qr_old_bridge_404_points_to_pair(self):
+        # no /api/qr route on the fake bridge -> 404, like a bridge from before the QR API
+        out = whatsapp.qr()
+        self.assertFalse(out["success"])
+        self.assertIs(out["qr_supported"], False)
+        self.assertIn("action='pair'", out["message"])
+
+    def test_qr_failure_already_linked(self):
+        self.bridge.responses["/api/qr"] = (409, {"success": False, "message": "already linked; nothing to pair"})
+        out = whatsapp.qr()
+        self.assertFalse(out["success"])
+        self.assertIn("Already linked", out["next_step"])
+
+    def test_status_qr_shown_passes_fields_and_hint(self):
+        pairing = {"state": "qr_shown", "qr_expires_in_sec": 15, "refs_left": 3,
+                   "last_event": "qr shown", "last_event_age_sec": 5}
+        self.bridge.responses["/api/status"] = (200, {
+            "connected": True, "logged_in": False, "own_jid": "", "pairing": pairing,
+        })
+        out = whatsapp.connection_status()
+        self.assertEqual(out["pairing"], pairing)
+        self.assertIn("QR is on screen", out["hint"])
+
+    def test_phone_reached_bridge_fallback_on_last_event(self):
+        # bridge from 23 Oct morning: no phone_reached_bridge field, only last_event
+        self.bridge.responses["/api/status"] = (200, {
+            "connected": True, "logged_in": False, "own_jid": "",
+            "pairing": {"state": "idle", "code_age_sec": None, "last_event": "notification received",
+                        "last_event_age_sec": 3},
+        })
+        status = whatsapp.connection_status()
+        self.assertIn("action='qr'", status["hint"])
+        self.bridge.responses["/api/pair"] = (200, {
+            "success": True, "code": "WXYZ-1234", "reused": False, "age_sec": 0, "expires_in_sec": 160,
+        })
+        out = whatsapp.pair("40700000000")
+        self.assertIn("action='qr'", out["warning"])
+
+    def test_phone_reached_bridge_field_steers_to_qr(self):
+        # new bridge: explicit field, last_event already overwritten by a later event
+        self.bridge.responses["/api/status"] = (200, {
+            "connected": True, "logged_in": False, "own_jid": "",
+            "pairing": {"state": "idle", "phone_reached_bridge": True,
+                        "last_event": "login socket closed by server after 162s", "last_event_age_sec": 2},
+        })
+        self.assertIn("action='qr'", whatsapp.connection_status()["hint"])
+        self.bridge.responses["/api/pair"] = (200, {
+            "success": True, "code": "WXYZ-1234", "reused": False, "age_sec": 0, "expires_in_sec": 160,
+        })
+        self.assertIn("action='qr'", whatsapp.pair("40700000000")["warning"])
+
+    def test_phone_reached_bridge_false_wins_over_last_event(self):
+        self.bridge.responses["/api/status"] = (200, {
+            "connected": True, "logged_in": False, "own_jid": "",
+            "pairing": {"state": "idle", "phone_reached_bridge": False,
+                        "last_event": "notification received", "last_event_age_sec": 2},
+        })
+        self.assertNotIn("reached this bridge", whatsapp.connection_status()["hint"])
+        self.assertFalse(whatsapp._phone_reached_bridge)
+
+    def test_pair_guidance_recommends_qr_and_switch_rule(self):
+        self.bridge.responses["/api/pair"] = (200, {
+            "success": True, "code": "ABCD-EFGH", "reused": False, "age_sec": 0, "expires_in_sec": 160,
+        })
+        out = whatsapp.pair("40700000000")
+        self.assertIn("action='qr' is the recommended way", out["guidance"])
+        self.assertIn("notification received", out["guidance"])
+
+
     # --- reconnect --------------------------------------------------------------
 
     def test_reconnect_on_unlinked_bridge_points_to_pair(self):
@@ -200,3 +315,4 @@ class PairingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
