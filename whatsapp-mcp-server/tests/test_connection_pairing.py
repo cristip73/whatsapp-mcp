@@ -191,15 +191,25 @@ class PairingTests(unittest.TestCase):
         self.assertEqual(out["markdown"], "![QR](/tmp/wa-qr/current.png)")
         self.assertEqual(out["expires_in_sec"], 58)
         self.assertEqual(out["refs_left"], 5)
-        self.assertEqual(out["text_qr"], "#### QR ####")
+        self.assertNotIn("text_qr", out)  # QR keys must not reach the conversation
         self.assertNotIn("qr", out)  # raw ref string is not useful to the agent
         self.assertIn("absolute path", out["guidance"])
-        self.assertIn("code block", out["guidance"])
+        self.assertIn("Never paste the QR as text", out["guidance"])
         self.assertIn("call action='qr' again", out["guidance"])
         self.assertIn("logged_in", out["guidance"])
         self.assertIn("Do NOT choose", out["phone_steps"])
         method, path, _ = self.bridge.requests[-1]
         self.assertEqual((method, path), ("POST", "/api/qr"))
+
+    def test_qr_without_image_is_an_error_not_a_text_fallback(self):
+        self.bridge.responses["/api/qr"] = (200, {
+            "success": True, "image_path": "", "text_qr": "#### QR ####",
+            "expires_in_sec": 60, "refs_left": 6,
+        })
+        out = whatsapp.qr()
+        self.assertFalse(out["success"])
+        self.assertNotIn("text_qr", out)
+        self.assertIn("pair", out["next_step"])
 
     def test_qr_guidance_requires_another_screen_via_t3_web(self):
         self.bridge.responses["/api/qr"] = (200, {
@@ -305,3 +315,4 @@ class PairingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

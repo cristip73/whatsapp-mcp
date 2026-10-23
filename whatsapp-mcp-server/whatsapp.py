@@ -1637,7 +1637,7 @@ PAIR_GUIDANCE = (
     "returns the same code (reused=true) only for about 2 minutes, after that it issues a NEW one. "
     "If the phone says \"Couldn't link device\", it is not the user's fault: do not promise more time "
     "and do not guess the cause (version, timing). "
-    "If the phone said \"Couldn't link device\" and connection status shows pairing.last_event \"notification received\" (the phone reached this bridge), do not ask for a second code: use action='qr' instead. "
+    "If the phone said \"Couldn't link device\" and connection status shows pairing.phone_reached_bridge = true (on older bridges: pairing.last_event \"notification received\"), the phone reached this bridge and was still refused: do not ask for a second code, use action='qr' instead. "
     "After 2 failed codes in a row, stop: ask the user to check that WhatsApp is up to date and that "
     "the phone does not already have 4 linked devices, and suggest a pause of a few hours before the "
     "next try (WhatsApp may block linking for a while after repeated attempts). If it still fails after the pause, tell them to "
@@ -1754,7 +1754,8 @@ QR_GUIDANCE = (
     "then scan the QR that appears there with the phone. Call qr only after they confirm they see the "
     "conversation on the big screen. "
     "Put the QR image in your reply as markdown with the absolute path: ![QR](<image_path>). "
-    "If the user says they cannot see the image, put text_qr in a code block instead. "
+    "Never paste the QR as text: it contains linking keys and conversations are kept. If the user "
+    "cannot see the image, check they are in T3 (desktop app or https://app.t3.codes/) and call qr again. "
     "Give them the phone steps (scan the QR; not the phone-number option). "
     "The QR changes: the first one lasts about 60 s, the next ones about 20 s. If they did not "
     "manage in time, call action='qr' again and show the new image: that is safe, unlike pairing "
@@ -1818,11 +1819,15 @@ def qr() -> Dict[str, Any]:
             out["next_step"] = "Do not retry in a loop. Run connection status once and tell the user plainly what it says."
         return out
     out: Dict[str, Any] = {"success": True}
-    for key in ("image_path", "expires_in_sec", "refs_left", "text_qr", "message"):
+    # text_qr and qr are left out on purpose: the QR string carries linking keys, and whatever a tool
+    # returns is stored in the conversation, which other accounts on the mini can read (D9).
+    for key in ("image_path", "expires_in_sec", "refs_left", "message"):
         if raw.get(key) is not None:
             out[key] = raw.get(key)
-    if out.get("image_path"):
-        out["markdown"] = f"![QR]({out['image_path']})"
+    if not out.get("image_path"):
+        return {"success": False, "message": "The bridge could not write the QR image.",
+                "next_step": "Call qr once more; if there is still no image, use pair (code) instead."}
+    out["markdown"] = f"![QR]({out['image_path']})"
     out["guidance"] = QR_GUIDANCE
     out["phone_steps"] = QR_PHONE_STEPS
     return out

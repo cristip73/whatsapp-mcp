@@ -707,6 +707,15 @@ func (pc *pairingController) handleEvent(raw any) {
 		for i, c := range pc.qrRemaining {
 			pc.qrRemaining[i] = strings.Replace(c, evt.OldSecret, evt.NewSecret, 1)
 		}
+		if pc.qrCur != "" {
+			// qrchan.go restarts the timer for the rewritten current ref: 60 s if it is still the
+			// first of the batch, 20 s otherwise.
+			ttl := pc.qrNextTTL
+			if len(pc.qrRemaining)+1 == pc.qrTotal {
+				ttl = pc.qrFirstTTL
+			}
+			pc.qrCurExpires = time.Now().Add(ttl)
+		}
 		if pc.socketPurpose == socketForQR && pc.qrCur != "" {
 			pc.log.Infof("pairing: QR secret rotated by the server; refs updated")
 			if pc.qrMode && pc.qrOut != nil {

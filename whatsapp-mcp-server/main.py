@@ -502,8 +502,8 @@ def connection(action: str = "status", phone: Optional[str] = None) -> Dict[str,
     - The QR must be on another screen than the phone. Before calling "qr", ask where the user
       reads this conversation; if on the phone, have them open it on a computer at
       https://app.t3.codes/ (log in with their T3 password) and confirm before you call "qr".
-    - Show the image as markdown with the absolute path: ![QR](<image_path>); if the user
-      cannot see it, put text_qr in a code block. Phone: Linked devices > Link a device, scan
+    - Show the image as markdown with the absolute path: ![QR](<image_path>). Never paste the
+      QR as text (it carries linking keys and conversations are kept). Phone: Linked devices > Link a device, scan
       (NOT "Link with phone number instead"). The QR rotates (~60 s, then ~20 s): calling
       "qr" again is safe. After the scan, check "status" until logged_in = true.
     - A bridge without QR answers "no QR linking": use "pair" then.
@@ -517,8 +517,8 @@ def connection(action: str = "status", phone: Optional[str] = None) -> Dict[str,
       and do not guess the cause (expiry, app version).
     - After 2 failed codes in a row, stop. Ask the user to check that WhatsApp is up to date
       and that the phone has fewer than 4 linked devices, and suggest a pause of a few hours.
-    - If the phone said "Couldn't link device" and status shows pairing.last_event
-      "notification received" (the phone reached the bridge), do not try a second code: use "qr".
+    - If the phone said "Couldn't link device" and status shows pairing.phone_reached_bridge
+      = true (older bridges: last_event "notification received"), do not try a second code: use "qr".
     - Follow the "guidance" and "warning" fields of the pair and qr answers.
 
     Args:
