@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"image"
@@ -24,7 +25,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -67,25 +68,9 @@ var bindHost = "127.0.0.1"
 var apiToken string
 
 // Pairing by phone number (instead of scanning a QR code). The REST handler hands the
-// request to the pairing loop in main, which owns the websocket, and waits for the code.
-type pairRequest struct {
-	phone string
-	resp  chan pairResponse
-}
-
-type pairResponse struct {
-	code string
-	err  error
-}
-
-var pairRequests = make(chan pairRequest)
-
-// Set once the device is linked; /api/pair refuses after that.
-var pairedMu sync.Mutex
-var paired bool
-
-// True while waitForPairing is running, i.e. while /api/pair has someone to talk to.
-var pairingActive bool
+// request to the pairing loop (pairing.go), which owns the websocket, and waits for the code.
+// nil once the bridge started with a linked session.
+var pairing *pairingController
 
 // Database handler for storing message history
 type MessageStore struct {
@@ -1990,7 +1975,8 @@ func loadTokenFile(path string) (string, error) {
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
 	// Handler for pairing by phone number: POST {"phone": "40722123456"} -> {"code": "ABCD-EFGH"}.
 	// The code is typed on the phone: WhatsApp > Linked devices > Link a device >
-	// "Link with phone number instead". Valid for the ~160s the login websocket stays open.
+	// "Link with phone number instead". A second request for the SAME number while the code is
+	// young and its socket alive returns the same code (reused: true) instead of killing it.
 	http.HandleFunc("/api/pair", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method != http.MethodPost {
@@ -1998,18 +1984,15 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "use POST"})
 			return
 		}
-		pairedMu.Lock()
-		alreadyPaired := client.Store.ID != nil
-		active := pairingActive
-		pairedMu.Unlock()
-		if alreadyPaired {
+		if client.Store.ID != nil {
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "already linked; nothing to pair"})
 			return
 		}
-		if !active {
+		pc := pairing
+		if pc == nil || !pc.active.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "bridge is restarting after a logout; try again in about a minute"})
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": errPairingNotRunning.Error()})
 			return
 		}
 		var req struct {
@@ -2020,24 +2003,31 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "body must be {\"phone\": \"<international number, digits only>\"}"})
 			return
 		}
-		pr := pairRequest{phone: req.Phone, resp: make(chan pairResponse, 1)}
-		select {
-		case pairRequests <- pr:
-		case <-time.After(20 * time.Second):
-			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "pairing loop busy, try again"})
+		res, err := pc.Request(req.Phone)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, errPairingNotRunning) {
+				status = http.StatusServiceUnavailable
+			}
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
 			return
 		}
-		res := <-pr.resp
-		if res.err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": res.err.Error()})
-			return
+		msg := "New code. Type it on the phone right away. Do not ask for another code while this one is valid."
+		if res.reused {
+			msg = "Same code as before: the bridge still has it open. Type this one; asking again returns it again."
+		}
+		expires := pairCodeNominalSec - res.ageSec
+		if expires < 0 {
+			expires = 0
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":        true,
 			"code":           res.code,
-			"expires_in_sec": 150,
+			"reused":         res.reused,
+			"age_sec":        res.ageSec,
+			"expires_in_sec": expires,
+			"message":        msg,
 			"instructions":   "On the phone: WhatsApp > Settings > Linked devices > Link a device > Link with phone number instead, then type the code.",
 		})
 	})
@@ -2788,28 +2778,33 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		if client.Store.ID != nil {
 			ownJID = client.Store.ID.ToNonAD().String() // clean form without :device suffix (e.g. 40720900690@s.whatsapp.net)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		resp := map[string]interface{}{
 			"connected": isConnected,
 			"logged_in": isLoggedIn,
 			"own_jid":   ownJID,
-		})
+		}
+		if !isLoggedIn && pairing != nil {
+			resp["pairing"] = pairing.Status()
+		}
+		json.NewEncoder(w).Encode(resp)
 	})
 
 	// Handler for reconnecting
 	http.HandleFunc("/api/reconnect", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if client.IsConnected() {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success": true,
-				"message": "already connected",
-			})
-			return
-		}
+		// Unlinked: the pairing loop owns the login socket; reconnect must not open another one.
 		if client.Store.ID == nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success": false,
-				"message": "not logged in - restart bridge and scan QR code",
+				"message": "not logged in: this bridge is not linked yet, so there is nothing to reconnect. Link it with POST /api/pair {\"phone\": ...} (one pairing code).",
+			})
+			return
+		}
+		if client.IsConnected() {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"message": "already connected",
 			})
 			return
 		}
@@ -2868,6 +2863,7 @@ func main() {
 	bindFlag := flag.String("bind", bindHost, "Interface for the REST API. Keep it on loopback.")
 	portFlag := flag.Int("port", 8080, "Port for the REST API. Use a different port per account when several bridges share a machine.")
 	tokenFileFlag := flag.String("token-file", "", "File holding the REST API bearer token. Empty = no authentication. Required when other users share the machine.")
+	qrFlag := flag.Bool("qr", false, "While not linked, keep a login socket open and print QR codes on stdout (also on when stdout is a terminal). Off by default: under launchd stdout is the log.")
 	flag.Parse()
 	bindHost = *bindFlag
 	if *tokenFileFlag != "" {
@@ -2927,8 +2923,16 @@ func main() {
 		}
 	}
 
-	// Create client instance
-	client := whatsmeow.NewClient(deviceStore, logger)
+	// Create client instance. While unlinked, the wrapper lifts whatsmeow's pairing Debug lines to
+	// INFO (summarised, no phone numbers); pairDebug is switched on/off by the pairing loop.
+	pairDebug := &atomic.Bool{}
+	clientLog := newPairingLogger(logger, pairDebug)
+	clientLog.onEvent = func(evt string) {
+		if pc := pairing; pc != nil {
+			pc.noteEvent(evt)
+		}
+	}
+	client := whatsmeow.NewClient(deviceStore, clientLog)
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
@@ -2976,13 +2980,45 @@ func main() {
 	// Connect to WhatsApp
 	restStarted := false
 	if client.Store.ID == nil {
-		// Not linked yet. Start the REST API first, so the device can be linked either by
-		// scanning the QR printed below (terminal / log) or by a pairing code from /api/pair.
+		// Not linked yet. Start the REST API first, so the device can be linked by a pairing
+		// code from /api/pair (or, with -qr / a terminal, by scanning the QR on stdout).
+		qrMode := *qrFlag || stdoutIsTerminal()
+		qrFile := filepath.Join(globalAbsStoragePath, "pairing-qr.txt")
+		_ = os.Remove(qrFile) // stale file from an older binary
+		var qrOut func(string)
+		if qrMode {
+			qrOut = func(code string) {
+				fmt.Println("\nScan this QR code with your WhatsApp app (or request a pairing code via POST /api/pair):")
+				qrterminal.GenerateHalfBlock(code, qrterminal.L, os.Stdout)
+				var buf bytes.Buffer
+				qrterminal.GenerateHalfBlock(code, qrterminal.L, &buf)
+				_ = os.WriteFile(qrFile, buf.Bytes(), 0600)
+			}
+		}
+		pairing = newPairingController(waPairClient{client}, logger, qrMode, qrOut, pairDebug)
 		startRESTServer(client, messageStore, *portFlag)
 		restStarted = true
-		if !waitForPairing(client, logger) {
+		pairCtx, stopPairSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+		linked := pairing.Run(pairCtx)
+		stopPairSignals()
+		if qrMode {
+			_ = os.Remove(qrFile)
+		}
+		if !linked {
 			return
 		}
+		// After PairSuccess the server ends the login socket with stream error 515 and whatsmeow
+		// reconnects by itself with the new session (connectionevents.go, case 515). That can take
+		// longer than the old fixed 2s, so wait for the login to finish instead of exiting early.
+		pairedAt := time.Now()
+		for !client.IsLoggedIn() && time.Since(pairedAt) < 30*time.Second {
+			time.Sleep(250 * time.Millisecond)
+		}
+		if !client.IsLoggedIn() {
+			logger.Errorf("Linked, but not logged in 30s after pairing; exiting so the bridge restarts with the saved session")
+			return
+		}
+		logger.Infof("pairing: session connected %ds after PairSuccess", int(time.Since(pairedAt).Seconds()))
 		fmt.Println("\nSuccessfully connected and authenticated!")
 	} else {
 		// Already logged in, just connect
@@ -2991,10 +3027,9 @@ func main() {
 			logger.Errorf("Failed to connect: %v", err)
 			return
 		}
+		// Wait a moment for connection to stabilize
+		time.Sleep(2 * time.Second)
 	}
-
-	// Wait a moment for connection to stabilize
-	time.Sleep(2 * time.Second)
 
 	if !client.IsConnected() {
 		logger.Errorf("Failed to establish stable connection")
@@ -3065,105 +3100,6 @@ func backfillLIDMappings(client *whatsmeow.Client, store *MessageStore, logger w
 		}
 	}
 	fmt.Printf("Backfill: seeded %d/%d LID->PN mappings from whatsmeow store\n", count, len(lids))
-}
-
-// waitForPairing keeps a login websocket open until the device is linked. Each
-// websocket lives ~160s (the QR codes run out), so it reopens them in a loop instead of
-// giving up: the bridge runs unattended under launchd and the person may link it hours later.
-// A pairing request from /api/pair reopens the websocket first, so the code gets the full window.
-func waitForPairing(client *whatsmeow.Client, logger waLog.Logger) bool {
-	qrFile := filepath.Join(globalAbsStoragePath, "pairing-qr.txt")
-	defer os.Remove(qrFile)
-	pairedMu.Lock()
-	pairingActive = true
-	pairedMu.Unlock()
-	defer func() {
-		pairedMu.Lock()
-		pairingActive = false
-		pairedMu.Unlock()
-	}()
-
-	open := func() (<-chan whatsmeow.QRChannelItem, error) {
-		qrChan, err := client.GetQRChannel(context.Background())
-		if err != nil {
-			return nil, err
-		}
-		if err := client.Connect(); err != nil {
-			return nil, err
-		}
-		return qrChan, nil
-	}
-
-	var qrChan <-chan whatsmeow.QRChannelItem
-	for {
-		if qrChan == nil {
-			c, err := open()
-			if err != nil {
-				logger.Errorf("Failed to open login websocket: %v (retrying in 15s)", err)
-				time.Sleep(15 * time.Second)
-				continue
-			}
-			qrChan = c
-		}
-
-		select {
-		case evt, ok := <-qrChan:
-			if !ok {
-				qrChan = nil
-				continue
-			}
-			switch evt.Event {
-			case whatsmeow.QRChannelEventCode:
-				fmt.Println("\nScan this QR code with your WhatsApp app (or request a pairing code via POST /api/pair):")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-				var buf bytes.Buffer
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, &buf)
-				_ = os.WriteFile(qrFile, buf.Bytes(), 0600)
-			case "success":
-				pairedMu.Lock()
-				paired = true
-				pairedMu.Unlock()
-				return true
-			default:
-				logger.Infof("Login window closed (%s); opening a new one", evt.Event)
-				client.Disconnect()
-				qrChan = nil
-			}
-
-		case req := <-pairRequests:
-			// Fresh websocket, so the code gets the whole ~160s window.
-			client.Disconnect()
-			c, err := open()
-			if err != nil {
-				req.resp <- pairResponse{err: fmt.Errorf("cannot open login websocket: %v", err)}
-				qrChan = nil
-				continue
-			}
-			qrChan = c
-			// Wait for the first QR event: it means the websocket is ready for pairing.
-			select {
-			case evt, ok := <-qrChan:
-				if !ok || evt.Event != whatsmeow.QRChannelEventCode {
-					req.resp <- pairResponse{err: fmt.Errorf("login websocket not ready (%v)", evt.Event)}
-					client.Disconnect()
-					qrChan = nil
-					continue
-				}
-			case <-time.After(20 * time.Second):
-				req.resp <- pairResponse{err: fmt.Errorf("login websocket not ready after 20s")}
-				client.Disconnect()
-				qrChan = nil
-				continue
-			}
-			code, err := client.PairPhone(context.Background(), req.phone, true, whatsmeow.PairClientChrome, "Chrome (macOS)")
-			if err != nil {
-				req.resp <- pairResponse{err: fmt.Errorf("pairing code request failed: %v", err)}
-				continue
-			}
-			logger.Infof("Pairing code issued for a phone ending in %s", lastDigits(req.phone, 3))
-			req.resp <- pairResponse{code: code}
-		}
-	}
 }
 
 // populatedFields lists the top-level fields set on a message (names only, no values),
@@ -3623,4 +3559,11 @@ func placeholderWaveform(duration uint32) []byte {
 	}
 
 	return waveform
+}
+
+// stdoutIsTerminal reports whether stdout is a terminal (an interactive run) rather than a file or
+// pipe (launchd writes stdout to the log file).
+func stdoutIsTerminal() bool {
+	fi, err := os.Stdout.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
