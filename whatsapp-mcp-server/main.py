@@ -493,16 +493,27 @@ def connection(action: str = "status", phone: Optional[str] = None) -> Dict[str,
     - connected=false, logged_in=true: the link exists but the connection dropped -> "reconnect".
     - logged_in=false: WhatsApp unlinked this device (removed from the phone, phone offline
       for many days, or session expired). The old link is gone; nothing to reconnect. Tell the
-      user plainly, ask for their number, and run "pair" for a fresh 8-character code.
+      user plainly, ask for their number, and run "pair" for an 8-character code.
     - "pair" answers "restarting" or the bridge is unreachable: it restarts itself after a
       logout; wait about a minute and try again.
 
+    Pairing rules (WhatsApp limits repeated linking attempts):
+    - One code at a time. Show it once. If the user mistyped it, call "pair" again with the
+      SAME number: while valid it returns the same code (reused=true). A new code cancels
+      the previous one, so never ask for a second code "just in case".
+    - "Couldn't link device" on the phone is not the user's fault. Do not promise more time
+      and do not guess the cause (expiry, app version).
+    - After 2 failed codes in a row, stop. Ask the user to check that WhatsApp is up to date
+      and that the phone has fewer than 4 linked devices, and suggest a pause of a few hours.
+    - Follow the "guidance" and "warning" fields of the pair answer.
+
     Args:
-        action: "status" (default) to check, "reconnect" to reconnect a dropped session,
+        action: "status" (default) to check (includes "pairing" while not linked),
+            "reconnect" to reconnect a dropped session (only when logged_in = true),
             or "pair" to get a pairing code when status shows logged_in = false
         phone: for action="pair" only - the account's number in international format,
-            digits only (e.g. 40722123456). The returned 8-character code is typed on that
-            phone within ~2 minutes: WhatsApp > Settings > Linked devices > Link a device >
+            digits only (e.g. 40722123456). The code is typed on that phone:
+            WhatsApp > Settings > Linked devices > Link a device >
             "Link with phone number instead".
     """
     if action == "reconnect":

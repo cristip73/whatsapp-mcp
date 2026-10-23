@@ -1616,33 +1616,189 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
         if 'conn' in locals():
             conn.close()
 
+# ── Pairing guidance (what the agent sees on connection/pair) ─────────────────
+# Why this exists: on 23 Oct 2026 an agent asked for 6 codes in 15 minutes for the
+# same number (each new code cancels the previous one), blamed a 2:40 expiry that was
+# not the cause, and guessed an app-version problem. WhatsApp limits repeated linking
+# attempts (threshold and duration undocumented), so the server spells out the rules.
+
+PAIR_PHONE_STEPS = (
+    "On the phone: WhatsApp > Settings > Linked devices > Link a device > "
+    "\"Link with phone number instead\", then type the code."
+)
+
+PAIR_GUIDANCE = (
+    "Show this code to the user once, with the phone steps. "
+    "If they mistyped it or need to see it again, do NOT ask for a new code: call pair again "
+    "with the same number - while the code is still valid you get the same code back (reused=true). "
+    "A new code cancels the previous one. "
+    "If the phone says \"Couldn't link device\", it is not the user's fault: do not promise more time "
+    "and do not guess the cause (version, timing). "
+    "After 2 failed codes in a row, stop: ask the user to check that WhatsApp is up to date and that "
+    "the phone does not already have 4 linked devices, and suggest a pause of a few hours before the "
+    "next try (WhatsApp limits repeated attempts). If it still fails after the pause, tell them to "
+    "contact whoever set up this agent, with the times of the attempts."
+)
+
+# Old bridges (before the reuse contract) issue a NEW code on every pair call.
+PAIR_GUIDANCE_OLD_BRIDGE = (
+    "Show this code to the user once, with the phone steps. "
+    "This bridge cannot hand out the same code twice: calling pair again issues a NEW code and "
+    "cancels this one. If they mistyped it, show this same code again instead of calling pair. "
+    "If the phone says \"Couldn't link device\", it is not the user's fault: do not promise more time "
+    "and do not guess the cause (version, timing). "
+    "After 2 failed codes in a row, stop: ask the user to check that WhatsApp is up to date and that "
+    "the phone does not already have 4 linked devices, and suggest a pause of a few hours before the "
+    "next try (WhatsApp limits repeated attempts). If it still fails after the pause, tell them to "
+    "contact whoever set up this agent, with the times of the attempts."
+)
+
+PAIR_STOP_WARNING = (
+    "STOP: this is new code number {n} for this number in the last hour, so the earlier ones failed "
+    "or were replaced. Do not request another code now. Ask the user to check that WhatsApp is up to "
+    "date and that the phone has fewer than 4 linked devices, then wait a few hours before trying again."
+)
+
+# Timestamps of NEW codes (reused=false) per phone, kept for the life of this MCP process.
+_PAIR_WINDOW_SEC = 3600
+_PAIR_WARN_AT = 3
+_new_codes_by_phone: Dict[str, List[float]] = {}
+
+
+def _digits(phone: str) -> str:
+    return "".join(ch for ch in str(phone) if ch.isdigit())
+
+
+def _record_new_code(phone: str, now: Optional[float] = None) -> int:
+    """Remember a newly issued code for this phone; return how many in the last hour."""
+    now = time.time() if now is None else now
+    key = _digits(phone)
+    recent = [t for t in _new_codes_by_phone.get(key, []) if now - t < _PAIR_WINDOW_SEC]
+    recent.append(now)
+    _new_codes_by_phone[key] = recent
+    return len(recent)
+
+
+def _shape_pair_response(raw: Any, phone: str) -> Dict[str, Any]:
+    """Turn the bridge's /api/pair answer into what the agent sees.
+
+    New bridges send code, reused, age_sec, expires_in_sec, message. Old bridges send
+    code + a fixed expires_in_sec (150) + instructions; that fixed value is dropped,
+    because it is the local whatsmeow timer, not the code's real lifetime.
+    """
+    if not isinstance(raw, dict):
+        return {"success": False, "message": f"Unexpected bridge response: {raw!r}"[:300]}
+
+    if not raw.get("success"):
+        out = {"success": False, "message": raw.get("message") or "pairing failed (no message from bridge)"}
+        msg = str(out["message"]).lower()
+        if "already linked" in msg:
+            out["next_step"] = "Already linked: run connection status; nothing to pair."
+        elif "restarting" in msg:
+            out["next_step"] = "Wait about a minute, then call pair once more with the same number."
+        else:
+            out["next_step"] = (
+                "Do not retry in a loop. Run connection status once and tell the user plainly what it says."
+            )
+        return out
+
+    new_bridge = "reused" in raw
+    out: Dict[str, Any] = {"success": True, "code": raw.get("code")}
+    if new_bridge:
+        reused = bool(raw.get("reused"))
+        out["reused"] = reused
+        if raw.get("age_sec") is not None:
+            out["age_sec"] = raw.get("age_sec")
+        if raw.get("expires_in_sec") is not None:
+            out["expires_in_sec"] = raw.get("expires_in_sec")
+            out["expires_note"] = "estimate from the bridge, not a guarantee"
+        out["guidance"] = PAIR_GUIDANCE
+    else:
+        reused = False
+        out["expires_in_sec"] = None
+        out["expires_note"] = "unknown (old bridge)"
+        out["guidance"] = PAIR_GUIDANCE_OLD_BRIDGE
+    if raw.get("message"):
+        out["message"] = raw.get("message")
+    out["phone_steps"] = PAIR_PHONE_STEPS
+
+    if not reused:
+        n = _record_new_code(phone)
+        out["new_codes_last_hour"] = n
+        if n >= _PAIR_WARN_AT:
+            out["warning"] = PAIR_STOP_WARNING.format(n=n)
+    return out
+
+
+def _status_hint(status: Dict[str, Any]) -> Optional[str]:
+    if status.get("logged_in"):
+        return None
+    pairing = status.get("pairing")
+    if isinstance(pairing, dict) and pairing.get("state") == "code_issued":
+        return (
+            "A pairing code is already active. If the user needs it again, call pair with the SAME number "
+            "(it returns the same code while valid); do not ask for a new one."
+        )
+    return "Not linked. To link, ask the user's number and call pair once (see the pair guidance)."
+
+
+# Note: ValueError is caught BEFORE RequestException on purpose - requests' JSONDecodeError
+# subclasses both, so a non-JSON answer would otherwise read as "Bridge unreachable".
 def connection_status() -> Dict[str, Any]:
     try:
         response = _http.get(f"{WHATSAPP_API_BASE_URL}/status", timeout=5)
-        if response.status_code == 200:
-            return response.json()
-        return {"connected": False, "logged_in": False, "error": f"HTTP {response.status_code}"}
+        if response.status_code != 200:
+            return {"connected": False, "logged_in": False, "error": f"HTTP {response.status_code}"}
+        data = response.json()
+    except ValueError:
+        return {"connected": False, "logged_in": False, "error": "Unexpected bridge response (not JSON)"}
     except requests.RequestException as e:
         return {"connected": False, "logged_in": False, "error": f"Bridge unreachable: {e}"}
+    if not isinstance(data, dict):
+        return {"connected": False, "logged_in": False, "error": "Unexpected bridge response"}
+    # The "pairing" object (new bridges, only while not linked) is passed through as is.
+    hint = _status_hint(data)
+    if hint:
+        data["hint"] = hint
+    return data
 
 
 def reconnect() -> Dict[str, Any]:
     try:
         response = _http.post(f"{WHATSAPP_API_BASE_URL}/reconnect", timeout=15)
-        return response.json()
+        data = response.json()
+    except ValueError:
+        return {"success": False, "message": "Unexpected bridge response (not JSON)"}
     except requests.RequestException as e:
         return {"success": False, "message": f"Bridge unreachable: {e}"}
+    if not isinstance(data, dict):
+        return {"success": False, "message": "Unexpected bridge response"}
+    if not data.get("success"):
+        msg = str(data.get("message", "")).lower()
+        unlinked = "not logged in" in msg
+        if not unlinked:
+            status = connection_status()
+            unlinked = status.get("logged_in") is False and "error" not in status
+        if unlinked:
+            return {
+                "success": False,
+                "message": "This device is not linked to WhatsApp (logged_in=false), so there is nothing to "
+                "reconnect. Ask the user's number and use connection action='pair' once.",
+            }
+    return data
 
 
 def pair(phone: str) -> Dict[str, Any]:
     """Ask the bridge for a pairing code (link by phone number instead of QR)."""
     try:
         response = _http.post(f"{WHATSAPP_API_BASE_URL}/pair", json={"phone": phone}, timeout=60)
-        return response.json()
-    except requests.RequestException as e:
-        return {"success": False, "message": f"Bridge unreachable: {e}"}
+        raw = response.json()
     except ValueError:
         return {"success": False, "message": f"Unexpected bridge response (HTTP {response.status_code})"}
+    except requests.RequestException as e:
+        return {"success": False, "message": f"Bridge unreachable: {e}",
+                "next_step": "Wait about a minute, then run connection status once."}
+    return _shape_pair_response(raw, phone)
 
 
 def send_message(recipient: str, message: str) -> Tuple[bool, str]:
