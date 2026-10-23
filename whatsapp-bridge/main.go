@@ -2032,6 +2032,57 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
+	// Handler for pairing by QR: POST (no body) -> the current QR ref as a string, a PNG in the
+	// storage path and a half-block text rendering. The QR is never written to the log.
+	http.HandleFunc("/api/qr", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "use POST"})
+			return
+		}
+		if client.Store.ID != nil {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": "already linked; nothing to pair"})
+			return
+		}
+		pc := pairing
+		if pc == nil || !pc.active.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": errPairingNotRunning.Error()})
+			return
+		}
+		res, err := pc.RequestQR()
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, errPairingNotRunning) {
+				status = http.StatusServiceUnavailable
+			}
+			w.WriteHeader(status)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "message": err.Error()})
+			return
+		}
+		msg := fmt.Sprintf("QR %d of %d, valid about %ds; %d more will follow on the same login socket. "+
+			"Show the image; the person scans it with WhatsApp > Settings > Linked devices > Link a device. "+
+			"Call qr again only when this one has expired: it returns the current QR, it does not reset anything.",
+			res.refIndex, res.refTotal, res.expiresIn, res.refsLeft)
+		if res.switched {
+			msg = "Switched from the pairing code to QR: the earlier code no longer works. " + msg
+		}
+		if res.imageErr != "" {
+			msg += " The PNG could not be written (" + res.imageErr + "); use text_qr."
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":        true,
+			"qr":             res.qr,
+			"image_path":     res.imagePath,
+			"text_qr":        res.textQR,
+			"expires_in_sec": res.expiresIn,
+			"refs_left":      res.refsLeft,
+			"message":        msg,
+		})
+	})
+
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
@@ -2929,7 +2980,7 @@ func main() {
 	clientLog := newPairingLogger(logger, pairDebug)
 	clientLog.onEvent = func(evt string) {
 		if pc := pairing; pc != nil {
-			pc.noteEvent(evt)
+			pc.loggerEvent(evt)
 		}
 	}
 	client := whatsmeow.NewClient(deviceStore, clientLog)
@@ -2996,6 +3047,7 @@ func main() {
 			}
 		}
 		pairing = newPairingController(waPairClient{client}, logger, qrMode, qrOut, pairDebug)
+		pairing.qrDir = globalAbsStoragePath // PNGs from POST /api/qr
 		startRESTServer(client, messageStore, *portFlag)
 		restStarted = true
 		pairCtx, stopPairSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)

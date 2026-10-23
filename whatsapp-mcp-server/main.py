@@ -7,6 +7,7 @@ from whatsapp import (
     connection_status as whatsapp_connection_status,
     reconnect as whatsapp_reconnect,
     pair as whatsapp_pair,
+    qr as whatsapp_qr,
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
     list_chats as whatsapp_list_chats,
@@ -493,11 +494,21 @@ def connection(action: str = "status", phone: Optional[str] = None) -> Dict[str,
     - connected=false, logged_in=true: the link exists but the connection dropped -> "reconnect".
     - logged_in=false: WhatsApp unlinked this device (removed from the phone, phone offline
       for many days, or session expired). The old link is gone; nothing to reconnect. Tell the
-      user plainly, ask for their number, and run "pair" for an 8-character code.
+      user plainly and link again: "qr" if they are at a screen (recommended), else "pair".
     - "pair" answers "restarting" or the bridge is unreachable: it restarts itself after a
       logout; wait about a minute and try again.
 
-    Pairing rules (WhatsApp may block linking for a while after repeated attempts):
+    QR linking ("qr", recommended when the user is at a screen, e.g. a laptop):
+    - The QR must be on another screen than the phone. Before calling "qr", ask where the user
+      reads this conversation; if on the phone, have them open it on a computer at
+      https://app.t3.codes/ (log in with their T3 password) and confirm before you call "qr".
+    - Show the image as markdown with the absolute path: ![QR](<image_path>); if the user
+      cannot see it, put text_qr in a code block. Phone: Linked devices > Link a device, scan
+      (NOT "Link with phone number instead"). The QR rotates (~60 s, then ~20 s): calling
+      "qr" again is safe. After the scan, check "status" until logged_in = true.
+    - A bridge without QR answers "no QR linking": use "pair" then.
+
+    Pairing rules for codes (WhatsApp may block linking for a while after repeated attempts):
     - One code at a time. Show it once. If the user mistyped it or needs it again, show the
       SAME code again; do not call "pair" for that (after about 2 minutes "pair" issues a NEW
       code even for the same number). A new code cancels the previous one, so never ask for a
@@ -506,12 +517,15 @@ def connection(action: str = "status", phone: Optional[str] = None) -> Dict[str,
       and do not guess the cause (expiry, app version).
     - After 2 failed codes in a row, stop. Ask the user to check that WhatsApp is up to date
       and that the phone has fewer than 4 linked devices, and suggest a pause of a few hours.
-    - Follow the "guidance" and "warning" fields of the pair answer.
+    - If the phone said "Couldn't link device" and status shows pairing.last_event
+      "notification received" (the phone reached the bridge), do not try a second code: use "qr".
+    - Follow the "guidance" and "warning" fields of the pair and qr answers.
 
     Args:
         action: "status" (default) to check (includes "pairing" while not linked),
             "reconnect" to reconnect a dropped session (only when logged_in = true),
-            or "pair" to get a pairing code when status shows logged_in = false
+            "qr" to get a login QR image, or "pair" to get a pairing code
+            (both only when status shows logged_in = false)
         phone: for action="pair" only - the account's number in international format,
             digits only (e.g. 40722123456). The code is typed on that phone:
             WhatsApp > Settings > Linked devices > Link a device >
@@ -519,6 +533,8 @@ def connection(action: str = "status", phone: Optional[str] = None) -> Dict[str,
     """
     if action == "reconnect":
         return whatsapp_reconnect()
+    if action == "qr":
+        return whatsapp_qr()
     if action == "pair":
         if not phone:
             return {"success": False, "message": "phone is required for action='pair' (international format, digits only)"}
