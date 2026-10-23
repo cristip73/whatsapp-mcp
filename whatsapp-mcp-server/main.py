@@ -497,10 +497,11 @@ def connection(action: str = "status", phone: Optional[str] = None) -> Dict[str,
     - "pair" answers "restarting" or the bridge is unreachable: it restarts itself after a
       logout; wait about a minute and try again.
 
-    Pairing rules (WhatsApp limits repeated linking attempts):
-    - One code at a time. Show it once. If the user mistyped it, call "pair" again with the
-      SAME number: while valid it returns the same code (reused=true). A new code cancels
-      the previous one, so never ask for a second code "just in case".
+    Pairing rules (WhatsApp may block linking for a while after repeated attempts):
+    - One code at a time. Show it once. If the user mistyped it or needs it again, show the
+      SAME code again; do not call "pair" for that (after about 2 minutes "pair" issues a NEW
+      code even for the same number). A new code cancels the previous one, so never ask for a
+      second code "just in case".
     - "Couldn't link device" on the phone is not the user's fault. Do not promise more time
       and do not guess the cause (expiry, app version).
     - After 2 failed codes in a row, stop. Ask the user to check that WhatsApp is up to date

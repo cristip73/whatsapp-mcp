@@ -1629,14 +1629,15 @@ PAIR_PHONE_STEPS = (
 
 PAIR_GUIDANCE = (
     "Show this code to the user once, with the phone steps. "
-    "If they mistyped it or need to see it again, do NOT ask for a new code: call pair again "
-    "with the same number - while the code is still valid you get the same code back (reused=true). "
-    "A new code cancels the previous one. "
+    "If they mistyped it or need to see it again, show them this SAME code again (it is in this "
+    "response); do not call pair for that. Call pair again only for a different number, or after "
+    "this code failed. A new code cancels the previous one: a repeated pair call for the same number "
+    "returns the same code (reused=true) only for about 2 minutes, after that it issues a NEW one. "
     "If the phone says \"Couldn't link device\", it is not the user's fault: do not promise more time "
     "and do not guess the cause (version, timing). "
     "After 2 failed codes in a row, stop: ask the user to check that WhatsApp is up to date and that "
     "the phone does not already have 4 linked devices, and suggest a pause of a few hours before the "
-    "next try (WhatsApp limits repeated attempts). If it still fails after the pause, tell them to "
+    "next try (WhatsApp may block linking for a while after repeated attempts). If it still fails after the pause, tell them to "
     "contact whoever set up this agent, with the times of the attempts."
 )
 
@@ -1649,12 +1650,12 @@ PAIR_GUIDANCE_OLD_BRIDGE = (
     "and do not guess the cause (version, timing). "
     "After 2 failed codes in a row, stop: ask the user to check that WhatsApp is up to date and that "
     "the phone does not already have 4 linked devices, and suggest a pause of a few hours before the "
-    "next try (WhatsApp limits repeated attempts). If it still fails after the pause, tell them to "
+    "next try (WhatsApp may block linking for a while after repeated attempts). If it still fails after the pause, tell them to "
     "contact whoever set up this agent, with the times of the attempts."
 )
 
 PAIR_STOP_WARNING = (
-    "STOP: this is new code number {n} for this number in the last hour, so the earlier ones failed "
+    "STOP: this is new code number {n} for this number in the last hour (counted in this agent session), so the earlier ones failed "
     "or were replaced. Do not request another code now. Ask the user to check that WhatsApp is up to "
     "date and that the phone has fewer than 4 linked devices, then wait a few hours before trying again."
 )
@@ -1736,8 +1737,9 @@ def _status_hint(status: Dict[str, Any]) -> Optional[str]:
     pairing = status.get("pairing")
     if isinstance(pairing, dict) and pairing.get("state") == "code_issued":
         return (
-            "A pairing code is already active. If the user needs it again, call pair with the SAME number "
-            "(it returns the same code while valid); do not ask for a new one."
+            "A pairing code is already active. If the user needs it again, show the code you already gave "
+            "them; do not call pair just to see it (after about 2 minutes pair issues a NEW code and "
+            "cancels the old one)."
         )
     return "Not linked. To link, ask the user's number and call pair once (see the pair guidance)."
 

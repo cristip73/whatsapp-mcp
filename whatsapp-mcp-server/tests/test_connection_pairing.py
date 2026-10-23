@@ -78,7 +78,7 @@ class PairingTests(unittest.TestCase):
         self.assertIs(out["reused"], False)
         self.assertEqual(out["age_sec"], 0)
         self.assertEqual(out["expires_in_sec"], 160)
-        self.assertIn("do NOT ask for a new code", out["guidance"])
+        self.assertIn("do not call pair for that", out["guidance"])
         self.assertIn("same number", out["guidance"])
         self.assertIn("A new code cancels the previous one", out["guidance"])
         self.assertIn("4 linked devices", out["guidance"])
@@ -164,7 +164,7 @@ class PairingTests(unittest.TestCase):
         })
         out = whatsapp.connection_status()
         self.assertEqual(out["pairing"], pairing)
-        self.assertIn("SAME number", out["hint"])
+        self.assertIn("show the code you already gave", out["hint"])
 
     def test_status_old_bridge_without_pairing(self):
         self.bridge.responses["/api/status"] = (200, {"connected": False, "logged_in": False, "own_jid": ""})
